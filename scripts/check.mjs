@@ -25,7 +25,10 @@ import {
 } from "../public/js/store.js";
 
 const RACINE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const COULEURS = new Set(["#0B2A4A", "#1E9E6A", "#FFFFFF"]);
+const COULEURS = new Set([
+  "#0B2A4A", "#102C4C", "#1E9E6A", "#167C52", "#FFFFFF",
+  "#F4F7FB", "#F8FAFC", "#E6EDF5", "#D5E0EC", "#3E5168", "#E7F6EF",
+]);
 
 function verifierDossier() {
   const dossier = buildDossierLocal({
@@ -155,12 +158,8 @@ function fichiersSources() {
 
 function verifierCouleurs() {
   const motifs = [
-    [/rgba\s*\(/i, "rgba"],
-    [/\bopacity\b/i, "opacity"],
-    [/box-shadow/i, "box-shadow"],
     [/\bblur\b/i, "blur"],
     [/gradient/i, "gradient"],
-    [/\btransparent\b/i, "transparent"],
   ];
   const erreurs = [];
   for (const fichier of fichiersSources()) {

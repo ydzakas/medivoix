@@ -1,4 +1,4 @@
-const VERSION = "medivoix-shell-2";
+const VERSION = "medivoix-shell-3";
 const RACINE = new URL("./", self.location).pathname;
 const vers = (chemin) => `${RACINE}${chemin.replace(/^\//, "")}`;
 const SHELL = [

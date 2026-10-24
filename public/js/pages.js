@@ -378,7 +378,7 @@ export function connexion() {
     }
   }
 
-  return h("div", { class: "pile" }, [
+  return h("div", { class: "pile ecran-etroit" }, [
     h("h1", {}, "Connexion soignant"),
     h("p", {}, "Médecins et infirmiers de la clinique. Les patients ouvrent leur carnet à part."),
     blocDemo(email, mot),

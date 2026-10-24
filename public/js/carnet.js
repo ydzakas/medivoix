@@ -126,7 +126,7 @@ function ecranConnexion() {
       ]),
     ]),
     h("main", { class: "contenu" }, [
-      h("div", { class: "pile" }, [
+      h("div", { class: "pile ecran-etroit" }, [
         h("h1", {}, "Mon carnet de santé"),
         h("p", {}, "Utilisez l'identifiant et le mot de passe remis par la clinique. Aucun autre dossier n'est accessible depuis cet espace."),
         h("form", {
