@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0B2A4A">
+  <meta name="description" content="MediVoix — Parlez, on rédige. Dossiers de la clinique, dictée vocale, carnet patient.">
+  <title>MediVoix — Parlez, on rédige.</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <a class="saut" href="#ecran">Aller au contenu</a>
+  <noscript>
+    <div class="alerte">
+      <strong>Erreur</strong>
+      <p>Activez JavaScript pour utiliser MediVoix.</p>
+    </div>
+  </noscript>
+  <div id="ecran" tabindex="-1"></div>
+  <script src="vendor/supabase.js"></script>
+  <script src="vendor/qrcode.js"></script>
+  <script src="vendor/jsQR.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

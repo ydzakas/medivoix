@@ -1,0 +1,10 @@
+{
+  "name": "medivoix",
+  "private": true,
+  "type": "module",
+  "description": "MediVoix — dossiers patients par la voix, pour une clinique.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node scripts/check.mjs"
+  }
+}

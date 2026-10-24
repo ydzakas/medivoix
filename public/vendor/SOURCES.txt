@@ -1,0 +1,19 @@
+Fichiers déposés ici, chargés en local, sans CDN dans l'application.
+
+supabase.js
+  Paquet : @supabase/supabase-js 2.74.0
+  Fichier : dist/umd/supabase.js
+  Licence : MIT
+
+qrcode.js
+  Paquet : qrcode-generator 1.4.4
+  Fichier : qrcode.js
+  Copyright (c) 2009 Kazuhiko Arase
+  Licence : MIT
+
+jsQR.js
+  Paquet : jsqr 1.4.0
+  Fichier : dist/jsQR.js
+  Copyright (c) 2017-2021 Cozmo
+  Licence : Apache-2.0
+  http://www.apache.org/licenses/LICENSE-2.0
