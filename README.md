@@ -1,20 +1,22 @@
 # MediVoix
 
-Parlez, on rédige. Le médecin dicte l'examen, Gemma 4 propose le dossier, et rien n'entre dans le carnet tant que le médecin n'a pas validé. Une clinique, à Lomé. Auteur : Joseph (Jo Digital).
+Parlez, on rédige.
 
-Le modèle qui rédige est **Gemma 4** (`gemma-4-26b-a4b-it`), un modèle à poids ouverts, appelé via l'API Gemini. Sans clé, un structurant local prend le relais et l'écran le dit clairement. Ce secours permet de montrer le parcours pendant le hackathon ; la voie prévue pour la clinique est Gemma 4.
+MediVoix est l'application d'une clinique. Le médecin dicte ce qu'il a trouvé, un dossier structuré est rédigé, puis le médecin le relit et le valide. L'infirmier consulte en lecture seule les dossiers et les consultations validées, et peut scanner un QR code. Chaque patient reçoit un compte, une fiche d'accès imprimable et un QR code. Ce QR code ne contient aucune donnée médicale : seulement l'origine du site et un lien `/#/p/<jeton>`. Une personne extérieure ne peut pas ouvrir le dossier. Chaque accès est inscrit dans un journal.
+
+Une seule clinique. Auteur : Joseph (Jo Digital), Lomé. Licence MIT.
 
 ## Lancer
+
+Aucun `npm install`. Node.js 20 ou plus récent suffit.
 
 ```bash
 node server.js
 ```
 
-Ouvrir http://127.0.0.1:8741 . Aucun `npm install` : le projet n'a pas de dépendance.
+Ouvrir [http://127.0.0.1:8741](http://127.0.0.1:8741). Le serveur écoute sur `0.0.0.0:8741`. L'espace patient est sur [http://127.0.0.1:8741/mon-carnet.html](http://127.0.0.1:8741/mon-carnet.html).
 
-Copier `.env.example` vers `.env` pour brancher Gemma 4. Laisser `GEMINI_API_KEY` vide garde le structurant local. Ne commitez jamais `.env`.
-
-Vérifier sans réseau ni clé :
+Contrôles :
 
 ```bash
 node scripts/check.mjs
@@ -22,49 +24,47 @@ node scripts/check.mjs
 
 ## Comptes de démonstration
 
-Tant que Supabase n'est pas configuré, les dossiers restent dans le navigateur.
+Visibles sur l'écran de connexion uniquement en mode local.
 
 | Rôle | Identifiant | Mot de passe |
 | --- | --- | --- |
-| Médecin | medecin@clinique.medivoix.app | CliniqueDemo1 |
-| Infirmier | infirmier@clinique.medivoix.app | CliniqueDemo1 |
+| Médecin | `medecin@clinique.medivoix.app` | `CliniqueDemo1` |
+| Infirmier | `infirmier@clinique.medivoix.app` | `CliniqueDemo1` |
 
-Sur la liste des patients, « Créer un patient de démonstration » ajoute Koffi Mensah (démo), 45 ans, groupe O+, HTA, allergie à la pénicilline, amlodipine, et une consultation validée il y a trois mois. Le mot de passe du patient s'affiche une seule fois.
+Le patient n'a pas de compte fixe. Le médecin crée un dossier, ou clique sur **Créer un patient de démonstration**. L'identifiant et le mot de passe provisoire s'affichent une seule fois sur la fiche. À la première connexion, le patient doit les changer. L'infirmier ne peut ni créer, ni modifier, ni dicter.
 
-## Parcours
+## Mode local et mode clinique
 
-1. Le médecin crée la fiche. L'application propose un identifiant et un mot de passe provisoire, à imprimer. Le QR code ne contient qu'un jeton.
-2. Il dicte. « Insérer un exemple » colle une céphalée avec TA 160/100.
-3. « Générer le dossier » interroge Gemma 4 si la clé est présente, sinon le structurant local. Le bandeau nomme la source.
-4. Le médecin coche les lignes de traitement à retenir, puis valide. Les antécédents connus sont fusionnés, jamais effacés.
-5. L'infirmier lit les dossiers validés et scanne le QR code. Il ne dicte pas.
-6. Le patient ouvre `mon-carnet.html`, change son mot de passe provisoire, puis voit ses consultations validées.
+`public/js/config.js` est livré avec `SUPABASE_URL` et `SUPABASE_ANON_KEY` vides. L'application travaille alors dans le navigateur (`localStorage`) et `POST /api/generate` répond avec le rédacteur local (`buildDossierLocal`). Ce n'est pas un modèle distant : la dictée n'est pas journalisée par le serveur de développement.
 
-## Supabase
+Pour la clinique :
 
-1. Créer un projet vide.
-2. Coller `supabase/schema.sql` dans l'éditeur SQL.
-3. Désactiver la confirmation d'e-mail (Authentication → Providers → Email), sinon la création du compte patient depuis le navigateur échoue.
-4. Renseigner `SUPABASE_URL` et `SUPABASE_ANON_KEY` dans `public/js/config.js` pour le navigateur, et les mêmes valeurs dans `.env` si le serveur doit les connaître.
+1. Créer un projet Supabase vide.
+2. Coller `supabase/schema.sql` dans l'éditeur SQL et l'exécuter une fois.
+3. Pour une démonstration, désactiver la confirmation par e-mail dans Authentication.
+4. Copier l'URL du projet et la clé **anon** publique dans `public/js/config.js`. Ne jamais y mettre la clé `service_role`.
+5. Créer le premier médecin avec **Créer un compte soignant**.
+6. Déployer le site sur Cloudflare Pages pour que la dictée passe par Workers AI.
 
-Le médecin ne peut pas réinitialiser le mot de passe d'un patient depuis l'application : cela demande la clé service, qui ne doit pas être dans le navigateur. Cette réinitialisation se fait dans le tableau de bord Supabase.
+En mode Supabase, la génération distante vérifie le jeton du médecin puis appelle le binding `AI`. Si cet appel n'est pas disponible, la rédaction échoue : le repli local du navigateur ne s'applique que lorsque l'URL Supabase est vide.
 
-## Gemma 4, Cloudflare, GitHub Pages
+## Cloudflare
 
-- Machine locale : `node server.js` lit `GEMINI_API_KEY` et appelle `gemma-4-26b-a4b-it`. La dictée n'est pas journalisée.
-- Cloudflare Pages, optionnel : pas de commande de build, dossier de sortie `public`, liaison Workers AI `AI`. Le fichier `functions/api/generate.js` utilise alors Llama (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`) avec le même prompt, réservé aux médecins connectés. Ne pas y mettre `GEMINI_API_KEY`.
-- GitHub Pages : Settings → Pages → Source : GitHub Actions. Le workflow `.github/workflows/deploy.yml` publie `public/` à chaque push sur `main`. Ce site statique n'a pas la clé : la génération retombe sur le structurant local.
+Aucun build, aucune installation.
 
-## Sécurité, dites clairement
+- Projet Pages, préconfiguration **None**.
+- Commande de build : vide.
+- Répertoire de sortie : `public`.
+- `functions/api/generate.js` est la Pages Function `POST /api/generate`.
+- Variables : `SUPABASE_URL` et `SUPABASE_ANON_KEY`, les mêmes valeurs que dans `public/js/config.js`.
+- Liaison Workers AI nommée `AI`.
+- `wrangler.toml` indique le modèle et `compatibility_date`.
 
-- Trois couleurs : marine `#0B2A4A`, vert `#1E9E6A`, blanc `#FFFFFF`. Le micro qui écoute est vert, parce que le rouge est hors charte.
-- Le mode démonstration n'est pas un dossier clinique : les données sont dans le navigateur, et les mots de passe y sont seulement empreints pour ne pas rester en clair.
-- Le journal est écrit par le client. Il garde le nom même après suppression.
-- Le QR code d'un autre site est refusé. Un patient qui scanne un dossier ne voit pas les données médicales.
-- Ce n'est pas un chiffrement de bout en bout.
+## Limites de sécurité
 
-## Équipe et outils
-
-Joseph (Jo Digital), Lomé. Licence MIT, voir `LICENSE`.
-
-Assistants de code utilisés : Cursor, pour écrire et relire le dépôt pendant le Hacktoberfest Hack Day Lomé × Python Togo (24 octobre 2026). Le modèle open-weight au cœur du produit est Gemma 4. Les consignes des agents sont dans `AGENTS.md`. Le produit, la charte et l'architecture sont dans `docs/`.
+- Le QR code porte uniquement `origine/#/p/<jeton>`. Sans session médecin ou infirmier, l'accès est refusé et aucune donnée médicale n'est affichée.
+- Un patient ne voit ni les brouillons, ni les autres dossiers. Un infirmier ne voit que les consultations validées.
+- Le journal est en ajout seulement : consultation, scan, création, modification, validation, suppression.
+- La Row Level Security de `supabase/schema.sql` est la barrière côté base. La clé anon est publique par conception ; la clé `service_role` ne doit jamais être dans le navigateur ni dans ce dépôt.
+- Le mode local conserve les dossiers dans le navigateur. Il sert à la démonstration, pas à une clinique réelle.
+- Réinitialiser le mot de passe d'un patient, lorsqu'il l'a perdu, se fait dans le tableau de bord Supabase (Authentication → Users). L'application ne le fait pas : elle n'a pas de clé d'administration.

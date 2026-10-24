@@ -1,26 +1,34 @@
-import { EXEMPLE_DICTEE, dossierPourEnregistrement, fusionnerAntecedents, normaliserAntecedents, normalizeDossier } from "./dossier.js";
+import { generateDossier } from "./api.js";
+import {
+  dossierPourEnregistrement,
+  EXEMPLE_DICTEE,
+  fusionnerAntecedents,
+  normalizeDossier,
+  normaliserAntecedents,
+} from "./dossier.js";
 import { ficheAcces } from "./fiche.js";
 import {
-  GROUPES,
   ageAns,
+  formatDateHeure,
   formatDateLongue,
   formatDuree,
+  GROUPES,
   libelleAction,
   libelleAge,
   libelleRole,
   libelleSexe,
-  formatDateHeure,
+  plier,
 } from "./format.js";
 import { logAccess } from "./journal.js";
 import { mountMic } from "./mic.js";
-import { generateDossier } from "./api.js";
 import { lireJeton } from "./qr.js";
 import { blocAntecedents, editeurDossier, lectureDossier } from "./rendu.js";
+import { speech } from "./speech.js";
 import {
-  COMPTE_DEMO,
   changerMotDePasse,
-  creerPatientDemonstration,
+  COMPTE_DEMO,
   createPatient,
+  creerPatientDemonstration,
   estLocal,
   getConsultation,
   getPatient,
@@ -34,775 +42,1276 @@ import {
   signInCaregiver,
   signUpCaregiver,
   supprimerConsultation,
+  signOut,
   supprimerPatient,
   updatePatient,
   utilisateurCourant,
 } from "./store.js";
-import { alerte, badgeStatut, champ, confirmer, h, squelettes, toast, vide } from "./ui.js";
+import {
+  alerte,
+  badgeStatut,
+  champ,
+  confirmer,
+  h,
+  squelettes,
+  toast,
+  vide,
+} from "./ui.js";
 
-function estMedecin() {
-  return utilisateurCourant()?.role === "medecin";
+const RETOUR = "medivoix.retour";
+const PAGE_JOURNAL = 30;
+
+function role() {
+  return utilisateurCourant()?.role || "";
 }
 
-function choix(options, valeur) {
-  const el = h("select", {}, options.map(([val, label]) => h("option", { value: val }, label)));
-  el.value = valeur ?? "";
-  return el;
+function message(error) {
+  return error?.message || "Opération impossible. Réessayez.";
 }
 
-function pied() {
-  return h("footer", { class: "pied" }, [
-    h("div", { class: "pied-inner" }, [
-      h("p", {}, "Aide à la rédaction. La décision reste celle du médecin."),
-      h("p", {}, "MediVoix · une clinique · Lomé. Conçu par Joseph (Jo Digital)."),
-      h("p", {}, "Outils : Cursor pour le code. Gemma 4 (open-weight, via l'API Gemini) pour le dossier quand la clé est présente."),
+function suivi() {
+  let actif = true;
+  window.addEventListener("medivoix-leave", () => { actif = false; }, { once: true });
+  return () => actif;
+}
+
+function aller(hash) {
+  if (location.hash === hash) window.dispatchEvent(new Event("hashchange"));
+  else location.hash = hash;
+}
+
+function hashApresConnexion() {
+  let valeur = "";
+  try {
+    valeur = sessionStorage.getItem(RETOUR) || "";
+    sessionStorage.removeItem(RETOUR);
+  } catch {
+    valeur = "";
+  }
+  if (/^#\/[\w./%-]*$/.test(valeur) && valeur !== "#/connexion") return valeur;
+  return "#/patients";
+}
+
+function monter(racine, enfants) {
+  const liste = [enfants].flat(3).filter((item) => item != null && item !== false && item !== true);
+  racine.replaceChildren(...liste);
+  const titre = racine.querySelector("h1");
+  const actif = document.activeElement;
+  const hote = document.querySelector("#ecran");
+  if (titre && (!actif || actif === document.body || actif === hote)) {
+    titre.setAttribute("tabindex", "-1");
+    titre.focus();
+  }
+}
+
+function info(libelle, valeur) {
+  return h("p", {}, [h("strong", {}, `${libelle} : `), valeur || "Non renseigné"]);
+}
+
+function lienPatient(id) {
+  return `#/patients/${encodeURIComponent(id)}`;
+}
+
+function lienRetour(id) {
+  return h("a", { class: "btn btn-secondaire no-print", href: lienPatient(id) }, "Retour au patient");
+}
+
+function selectGroupe(actuel) {
+  const select = h("select");
+  select.append(h("option", { value: "" }, "Non renseigné"));
+  for (const groupe of GROUPES) select.append(h("option", { value: groupe }, groupe));
+  select.value = GROUPES.includes(actuel) ? actuel : "";
+  return select;
+}
+
+function radiosSexe(actuel) {
+  const nom = `sexe-${crypto.randomUUID()}`;
+  const masculin = h("input", { type: "radio", name: nom, value: "M", checked: actuel === "M" });
+  const feminin = h("input", { type: "radio", name: nom, value: "F", checked: actuel === "F" });
+  return {
+    bloc: h("div", { class: "roles" }, [
+      h("label", { class: "role" }, [masculin, "Homme"]),
+      h("label", { class: "role" }, [feminin, "Femme"]),
+    ]),
+    valeur() {
+      if (masculin.checked) return "M";
+      if (feminin.checked) return "F";
+      return "";
+    },
+  };
+}
+
+function formulaireIdentite(patient, submitLabel, onSubmit, onAnnuler) {
+  const nom = h("input", { type: "text", autocomplete: "name", value: patient?.nom_complet || "" });
+  const naissance = h("input", { type: "date", autocomplete: "bday", value: patient?.date_naissance || "" });
+  const telephone = h("input", { type: "tel", autocomplete: "tel", value: patient?.telephone || "" });
+  const adresse = h("textarea", { rows: "3", autocomplete: "street-address" });
+  adresse.value = patient?.adresse || "";
+  const groupe = selectGroupe(patient?.groupe_sanguin || "");
+  const sexe = radiosSexe(patient?.sexe || "");
+  const erreur = h("div");
+  const bouton = h("button", { type: "submit", class: "btn btn-primaire" }, submitLabel);
+  return h("form", {
+    class: "pile",
+    novalidate: true,
+    onsubmit: (event) => {
+      event.preventDefault();
+      void envoyer();
+    },
+  }, [
+    champ("Nom complet", nom, "Obligatoire."),
+    h("div", { class: "champ" }, [h("span", {}, "Sexe"), sexe.bloc]),
+    champ("Date de naissance", naissance, "Facultative. Sert à calculer l'âge."),
+    champ("Téléphone", telephone),
+    champ("Adresse", adresse),
+    champ("Groupe sanguin", groupe),
+    erreur,
+    h("div", { class: "rangee" }, [
+      bouton,
+      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => onAnnuler?.() }, "Annuler"),
+    ]),
+  ]);
+
+  async function envoyer() {
+    erreur.replaceChildren();
+    const fields = {
+      nom_complet: nom.value.trim(),
+      sexe: sexe.valeur(),
+      date_naissance: naissance.value,
+      telephone: telephone.value.trim(),
+      adresse: adresse.value.trim(),
+      groupe_sanguin: groupe.value,
+    };
+    if (!fields.nom_complet || !fields.sexe) {
+      erreur.append(alerte("À compléter", "Le nom complet et le sexe sont obligatoires."));
+      return;
+    }
+    bouton.disabled = true;
+    try {
+      await onSubmit(fields);
+    } catch (error) {
+      erreur.replaceChildren(alerte("Erreur", message(error)));
+      bouton.disabled = false;
+    }
+  }
+}
+
+function blocFiche(resultat) {
+  const morceaux = [];
+  if (resultat.dejaExistant) {
+    morceaux.push(h("p", {}, "Ce patient de démonstration existe déjà. Le mot de passe provisoire n'est plus affiché."));
+  } else if (resultat.motDePasse) {
+    morceaux.push(h("p", {}, "Remettez cette fiche au patient. Le mot de passe ne sera plus affiché."));
+  }
+  morceaux.push(ficheAcces({
+    patient: resultat.patient,
+    motDePasse: resultat.motDePasse || "",
+  }));
+  morceaux.push(h("a", {
+    class: "btn btn-primaire",
+    href: lienPatient(resultat.patient.id),
+  }, "Ouvrir le dossier"));
+  return morceaux;
+}
+
+async function quitterAccueil() {
+  try {
+    await signOut();
+  } catch (error) {
+    toast(message(error), "erreur");
+    return;
+  }
+  aller("#/");
+}
+
+export function accueil() {
+  const user = utilisateurCourant();
+  const soignantConnecte = user && (user.role === "medecin" || user.role === "infirmier");
+  return h("div", {}, [
+    h("section", { class: "hero" }, [
+      h("div", { class: "hero-inner" }, [
+        h("p", { class: "kicker" }, "Une clinique"),
+        h("h1", { class: "marque" }, "MediVoix"),
+        h("p", { class: "slogan" }, "Parlez, on rédige."),
+        h("p", {}, "Le médecin dicte. MediVoix rédige le dossier. Le médecin relit et valide. L'infirmier consulte les dossiers validés. Chaque patient reçoit un compte, une fiche imprimable et un QR code qui ne contient aucune donnée médicale."),
+      ]),
+    ]),
+    h("section", { class: "entrees" }, [
+      h("a", { class: "entree", href: soignantConnecte ? "#/patients" : "#/connexion" }, [
+        h("span", { class: "kicker" }, "Personnel soignant"),
+        h("strong", {}, soignantConnecte ? "Ouvrir les dossiers" : "Espace soignant"),
+        h("span", {}, "Dicter, relire et valider. L'infirmier lit les consultations validées et scanne les QR codes."),
+      ]),
+      h("a", { class: "entree entree-patient", href: "/mon-carnet.html" }, [
+        h("span", { class: "kicker" }, "Patients"),
+        h("strong", {}, "Mon carnet"),
+        h("span", {}, "Consulter les consultations validées, avec l'identifiant remis par la clinique."),
+      ]),
+    ]),
+    soignantConnecte
+      ? h("div", { class: "contenu no-print" }, [
+        h("button", { type: "button", class: "btn btn-secondaire", onclick: () => { void quitterAccueil(); } }, "Quitter"),
+      ])
+      : null,
+    h("footer", { class: "pied" }, [
+      h("div", { class: "pied-inner" }, [
+        h("p", {}, "Joseph (Jo Digital), Lomé."),
+        h("p", {}, "Licence MIT. Une seule clinique."),
+      ]),
     ]),
   ]);
 }
 
-export function accueil() {
-  return h("div", {}, [
-    h("section", { class: "hero" }, [
-      h("div", { class: "hero-inner" }, [
-        h("p", { class: "marque" }, "MediVoix"),
-        h("p", { class: "slogan" }, "Parlez, on rédige."),
-        h("p", {}, "Le médecin dicte ce qu'il a trouvé. Le dossier se structure. La décision reste la sienne."),
-      ]),
+function blocDemo(emailInput, passInput) {
+  if (!estLocal()) return null;
+  const { medecin, infirmier } = COMPTE_DEMO;
+  const remplir = (compte) => {
+    emailInput.value = compte.email;
+    passInput.value = compte.motDePasse;
+    emailInput.focus();
+  };
+  return h("section", { class: "carte pile" }, [
+    h("h2", {}, "Comptes de démonstration"),
+    info("Médecin", medecin.email),
+    info("Mot de passe", medecin.motDePasse),
+    info("Infirmier", infirmier.email),
+    info("Mot de passe infirmier", infirmier.motDePasse),
+    h("div", { class: "rangee" }, [
+      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => remplir(medecin) }, "Utiliser le compte médecin"),
+      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => remplir(infirmier) }, "Utiliser le compte infirmier"),
     ]),
-    h("section", { class: "entrees" }, [
-      h("a", { class: "entree", href: "#/connexion" }, [
-        h("span", { class: "kicker" }, "Clinique"),
-        h("strong", {}, "Espace soignant"),
-        h("span", {}, "Médecins et infirmiers : dossiers, dictée, historique et QR code."),
-      ]),
-      h("a", { class: "entree entree-patient", href: "mon-carnet.html" }, [
-        h("span", { class: "kicker" }, "Carnet"),
-        h("strong", {}, "Espace patient"),
-        h("span", {}, "Consultations validées, traitements, antécédents et allergies."),
-      ]),
-    ]),
-    pied(),
   ]);
 }
 
 export function connexion() {
+  const email = h("input", { id: "email-soignant", type: "email", autocomplete: "username" });
+  const mot = h("input", { id: "mot-de-passe-soignant", type: "password", autocomplete: "current-password" });
   const erreur = h("div");
-  const email = h("input", { type: "email", autocomplete: "username", required: "true" });
-  const mot = h("input", { type: "password", autocomplete: "current-password", required: "true", minlength: "8" });
-  const nom = h("input", { type: "text", autocomplete: "name" });
-  const emailCreation = h("input", { type: "email", autocomplete: "username" });
-  const motCreation = h("input", { type: "password", autocomplete: "new-password", minlength: "8" });
-  let role = "medecin";
-  const formulaire = h("form", { class: "pile" }, [
+  const bouton = h("button", { type: "submit", class: "btn btn-primaire" }, "Se connecter");
+  const form = h("form", {
+    class: "pile",
+    novalidate: true,
+    onsubmit: (event) => {
+      event.preventDefault();
+      void entrer();
+    },
+  }, [
     champ("Adresse e-mail", email),
     champ("Mot de passe", mot),
     erreur,
-    h("button", { class: "btn btn-primaire btn-bloc", type: "submit" }, "Se connecter"),
+    bouton,
   ]);
-  formulaire.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    erreur.replaceChildren();
-    try {
-      await signInCaregiver(email.value, mot.value);
-      location.hash = "#/patients";
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
-    }
-  });
-  const creation = h("form", { class: "pile" }, [
+
+  const nom = h("input", { type: "text", autocomplete: "name" });
+  const emailCreation = h("input", { type: "email", autocomplete: "off" });
+  const motCreation = h("input", { type: "password", autocomplete: "new-password" });
+  const erreurCreation = h("div");
+  const boutonCreation = h("button", { type: "submit", class: "btn btn-secondaire" }, "Créer le compte");
+  let roleChoisi = "medecin";
+  const formCreation = h("form", {
+    class: "pile",
+    novalidate: true,
+    onsubmit: (event) => {
+      event.preventDefault();
+      void creer();
+    },
+  }, [
     champ("Nom affiché", nom),
     champ("Adresse e-mail", emailCreation),
-    champ("Mot de passe", motCreation, "8 caractères minimum."),
-    h("div", { class: "roles" }, [
-      h("label", { class: "role" }, [h("input", { type: "radio", name: "role", value: "medecin", checked: true, onchange: () => { role = "medecin"; } }), "Médecin"]),
-      h("label", { class: "role" }, [h("input", { type: "radio", name: "role", value: "infirmier", onchange: () => { role = "infirmier"; } }), "Infirmier"]),
+    champ("Mot de passe", motCreation, "Au moins 8 caractères."),
+    h("div", { class: "champ" }, [
+      h("span", {}, "Rôle"),
+      h("div", { class: "roles" }, [
+        h("label", { class: "role" }, [
+          h("input", { type: "radio", name: "role-creation", value: "medecin", checked: true, onchange: () => { roleChoisi = "medecin"; } }),
+          "Médecin",
+        ]),
+        h("label", { class: "role" }, [
+          h("input", { type: "radio", name: "role-creation", value: "infirmier", onchange: () => { roleChoisi = "infirmier"; } }),
+          "Infirmier",
+        ]),
+      ]),
     ]),
-    h("button", { class: "btn btn-succes btn-bloc", type: "submit" }, "Créer le compte"),
+    erreurCreation,
+    boutonCreation,
   ]);
-  creation.addEventListener("submit", async (event) => {
-    event.preventDefault();
+
+  async function entrer() {
     erreur.replaceChildren();
-    if (motCreation.value.length < 8) {
-      erreur.replaceChildren(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
+    if (!email.value.trim() || !mot.value) {
+      erreur.append(alerte("À compléter", "Indiquez l'adresse e-mail et le mot de passe."));
       return;
     }
+    bouton.disabled = true;
+    try {
+      await signInCaregiver(email.value, mot.value);
+      aller(hashApresConnexion());
+    } catch (error) {
+      erreur.replaceChildren(alerte("Erreur", message(error)));
+      bouton.disabled = false;
+    }
+  }
+
+  async function creer() {
+    erreurCreation.replaceChildren();
+    if (!nom.value.trim() || !emailCreation.value.trim() || motCreation.value.length < 8) {
+      erreurCreation.append(alerte("À compléter", "Nom, e-mail et mot de passe d'au moins 8 caractères sont obligatoires."));
+      return;
+    }
+    boutonCreation.disabled = true;
     try {
       const resultat = await signUpCaregiver({
         nom: nom.value,
         email: emailCreation.value,
         motDePasse: motCreation.value,
-        role,
+        role: roleChoisi,
       });
       if (resultat.confirmation) {
-        erreur.replaceChildren(alerte("À compléter", "Compte créé. Si la confirmation par e-mail est active, confirmez-la puis connectez-vous. Pour la démonstration, désactivez-la dans Supabase."));
+        erreurCreation.append(alerte("Compte créé", "Confirmez l'adresse si Supabase le demande, puis connectez-vous."));
+        boutonCreation.disabled = false;
         return;
       }
-      location.hash = "#/patients";
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
+      aller("#/patients");
+    } catch (error) {
+      erreurCreation.replaceChildren(alerte("Erreur", message(error)));
+      boutonCreation.disabled = false;
     }
-  });
-  creation.hidden = true;
-  const boutonConnexion = h("button", { type: "button", class: "btn btn-primaire" }, "Connexion");
-  const boutonCreation = h("button", { type: "button", class: "btn btn-secondaire" }, "Créer un compte");
-  boutonConnexion.addEventListener("click", () => {
-    formulaire.hidden = false;
-    creation.hidden = true;
-  });
-  boutonCreation.addEventListener("click", () => {
-    formulaire.hidden = true;
-    creation.hidden = false;
-  });
+  }
+
   return h("div", { class: "pile" }, [
-    h("h1", {}, "Espace soignant"),
-    h("p", {}, "Médecins et infirmiers de la clinique."),
-    h("div", { class: "rangee" }, [boutonConnexion, boutonCreation]),
-    formulaire,
-    creation,
-    estLocal() ? h("div", { class: "carte pile" }, [
-      h("h2", {}, "Comptes de démonstration"),
-      h("p", {}, `Médecin : ${COMPTE_DEMO.medecin.email} · ${COMPTE_DEMO.medecin.motDePasse}`),
-      h("p", {}, `Infirmier : ${COMPTE_DEMO.infirmier.email} · ${COMPTE_DEMO.infirmier.motDePasse}`),
-    ]) : h("p", { class: "aide" }, "Première mise en service : exécutez supabase/schema.sql, puis créez le compte du médecin."),
-    h("a", { href: "#/" }, "Retour à l'accueil"),
+    h("h1", {}, "Connexion soignant"),
+    h("p", {}, "Médecins et infirmiers de la clinique. Les patients ouvrent leur carnet à part."),
+    blocDemo(email, mot),
+    h("section", { class: "carte pile" }, [h("h2", {}, "Connexion"), form]),
+    h("section", { class: "carte pile" }, [
+      h("h2", {}, "Créer un compte soignant"),
+      h("p", { class: "aide" }, "Pour le premier médecin ou infirmier, lorsque Supabase est configuré."),
+      formCreation,
+    ]),
+    h("a", { class: "btn btn-secondaire", href: "/mon-carnet.html" }, "Espace patient"),
   ]);
 }
 
-export async function patients() {
-  const liste = h("div", { class: "pile" });
-  const recherche = h("input", { type: "search", placeholder: "Nom du patient" });
-  let timer = null;
-  async function charger(q = "") {
-    liste.replaceChildren(squelettes(3));
+export function patients() {
+  if (role() !== "medecin" && role() !== "infirmier") return interdit();
+  const racine = h("div", { class: "pile" });
+  const liste = h("div", { class: "pile", "aria-live": "polite" });
+  const recherche = h("input", { type: "search", autocomplete: "off" });
+  const vivant = suivi();
+  let timer = 0;
+  let ticket = 0;
+  const boutonDemo = h("button", {
+    type: "button",
+    class: "btn btn-secondaire",
+    onclick: () => { void demo(); },
+  }, "Créer un patient de démonstration");
+
+  monter(racine, [
+    h("div", { class: "rangee" }, [
+      h("h1", {}, "Patients"),
+      role() === "medecin" ? h("a", { class: "btn btn-primaire", href: "#/patients/nouveau" }, "Nouveau patient") : null,
+    ]),
+    role() === "infirmier"
+      ? h("p", { class: "aide" }, "Lecture seule : consultations validées, sans création ni modification.")
+      : boutonDemo,
+    h("form", {
+      class: "recherche",
+      onsubmit: (event) => {
+        event.preventDefault();
+        void charger();
+      },
+    }, [
+      champ("Rechercher un patient", recherche, "Le nom est filtré sans tenir compte des accents."),
+    ]),
+    liste,
+  ]);
+
+  recherche.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { void charger(); }, 250);
+  });
+  void charger();
+  return racine;
+
+  async function charger() {
+    const n = ++ticket;
+    liste.replaceChildren(squelettes());
     try {
-      const rows = await listPatients(q);
+      const rows = await listPatients(recherche.value);
+      if (n !== ticket || !vivant()) return;
       if (!rows.length) {
         liste.replaceChildren(vide(
-          q ? "Aucun résultat" : "Aucun patient",
-          q ? `Aucun patient ne correspond à « ${q} ».` : "Créez la première fiche. Le compte et le QR code sont générés ensemble.",
+          "Aucun patient",
+          recherche.value.trim()
+            ? "Aucun dossier ne correspond à cette recherche."
+            : "Aucun dossier n'est encore enregistré.",
         ));
         return;
       }
-      liste.replaceChildren(...rows.map((p) => h("a", { class: "carte", href: `#/patients/${p.id}` }, [
-        h("strong", {}, p.nom_complet),
-        h("p", {}, `${libelleAge(p.date_naissance)} · ${libelleSexe(p.sexe)}`),
-        h("p", { class: "aide" }, p.derniere_consultation
-          ? `Dernière consultation : ${formatDateLongue(p.derniere_consultation)}`
+      liste.replaceChildren(...rows.map((patient) => h("a", { class: "carte", href: lienPatient(patient.id) }, [
+        h("strong", {}, patient.nom_complet),
+        h("p", {}, `${libelleSexe(patient.sexe)} · ${libelleAge(patient.date_naissance)}`),
+        h("p", { class: "aide" }, patient.derniere_consultation
+          ? `Dernière consultation : ${formatDateLongue(patient.derniere_consultation)}`
           : "Aucune consultation"),
       ])));
-    } catch (e) {
-      liste.replaceChildren(alerte("Erreur", e.message));
+    } catch (error) {
+      if (n !== ticket || !vivant()) return;
+      liste.replaceChildren(alerte("Erreur", message(error)));
     }
   }
-  recherche.addEventListener("input", () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => charger(recherche.value), 250);
-  });
-  const actions = h("div", { class: "rangee" });
-  if (estMedecin()) {
-    actions.append(
-      h("a", { class: "btn btn-primaire", href: "#/patients/nouveau" }, "Nouveau patient"),
-      h("button", { type: "button", class: "btn btn-secondaire", onclick: creerDemo }, "Créer un patient de démonstration"),
-    );
-  }
-  const zone = h("div");
-  async function creerDemo() {
-    zone.replaceChildren(squelettes(2));
+
+  async function demo() {
+    boutonDemo.disabled = true;
     try {
       const resultat = await creerPatientDemonstration();
       if (!resultat.dejaExistant) {
         await logAccess(resultat.patient.id, "creation");
         await logAccess(resultat.patient.id, "validation");
       }
-      zone.replaceChildren(
-        resultat.dejaExistant
-          ? alerte("À compléter", "Le patient de démonstration existe déjà. Le mot de passe provisoire ne peut plus être affiché.")
-          : ficheAcces({ patient: resultat.patient, motDePasse: resultat.motDePasse }),
-        h("a", { class: "btn btn-primaire", href: `#/patients/${resultat.patient.id}` }, "Ouvrir la fiche"),
+      if (!vivant()) return;
+      liste.replaceChildren(
+        ...blocFiche(resultat),
+        h("button", { type: "button", class: "btn btn-secondaire", onclick: () => { void charger(); } }, "Retour à la liste"),
       );
-      charger(recherche.value);
-    } catch (e) {
-      zone.replaceChildren(alerte("Erreur", e.message));
+    } catch (error) {
+      if (vivant()) toast(message(error), "erreur");
+    } finally {
+      boutonDemo.disabled = false;
     }
   }
-  await charger();
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Patients"),
-    champ("Rechercher un patient", recherche),
-    actions,
-    liste,
-    zone,
-  ]);
 }
 
 export function nouveau() {
-  const nom = h("input", { type: "text", required: "true" });
-  const sexe = choix([["", "Choisir"], ["M", "Homme"], ["F", "Femme"]], "");
-  const date = h("input", { type: "date" });
-  const telephone = h("input", { type: "tel" });
-  const adresse = h("input", { type: "text" });
-  const groupe = choix([["", "Non renseigné"], ...GROUPES.map((g) => [g, g])], "");
-  const erreur = h("div");
-  const zone = h("div");
-  const form = h("form", { class: "pile" }, [
-    champ("Nom complet", nom),
-    champ("Sexe", sexe),
-    champ("Date de naissance", date),
-    champ("Téléphone", telephone),
-    champ("Adresse", adresse),
-    champ("Groupe sanguin", groupe),
-    erreur,
-    h("button", { class: "btn btn-succes btn-bloc", type: "submit" }, "Créer la fiche et le compte"),
-  ]);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    erreur.replaceChildren();
-    if (!nom.value.trim() || !sexe.value) {
-      erreur.replaceChildren(alerte("À compléter", "Le nom et le sexe sont obligatoires."));
-      return;
-    }
-    if (date.value && date.value > new Date().toISOString().slice(0, 10)) {
-      erreur.replaceChildren(alerte("Erreur", "La date de naissance est dans le futur."));
-      return;
-    }
-    try {
-      const cree = await createPatient({
-        nom_complet: nom.value,
-        sexe: sexe.value,
-        date_naissance: date.value,
-        telephone: telephone.value,
-        adresse: adresse.value,
-        groupe_sanguin: groupe.value,
-      });
-      await logAccess(cree.patient.id, "creation");
-      form.remove();
-      zone.replaceChildren(
-        ficheAcces({ patient: { ...cree.patient, identifiant: cree.identifiant }, motDePasse: cree.motDePasse }),
-        h("a", { class: "btn btn-primaire", href: `#/patients/${cree.patient.id}` }, "Ouvrir la fiche"),
-      );
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
-    }
-  });
-  return h("div", { class: "pile" }, [
+  if (role() !== "medecin") return interdit();
+  const racine = h("div", { class: "pile" });
+  const vivant = suivi();
+  monter(racine, [
     h("h1", {}, "Nouveau patient"),
-    h("p", {}, "Le compte, le mot de passe provisoire et le QR code sont créés en même temps."),
-    form,
-    zone,
+    h("p", {}, "La création ouvre un compte patient, une fiche imprimable et un QR code sans donnée médicale."),
+    formulaireIdentite(null, "Créer le dossier", async (fields) => {
+      const cree = await createPatient(fields);
+      await logAccess(cree.patient.id, "creation");
+      if (!vivant()) return;
+      monter(racine, [
+        h("h1", {}, "Dossier créé"),
+        blocFiche({ patient: cree.patient, motDePasse: cree.motDePasse }),
+      ]);
+    }, () => aller("#/patients")),
   ]);
+  return racine;
 }
 
-export async function patient({ id }) {
-  const p = await getPatient(id);
-  await logAccess(id, "consultation");
-  const consultations = await listConsultations(id);
-  const zone = h("div", { class: "pile" });
-  const actions = h("div", { class: "rangee no-print" });
-  if (estMedecin()) {
-    actions.append(
-      h("a", { class: "btn btn-succes", href: `#/patients/${id}/consultation` }, "Nouvelle consultation"),
-      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => zone.replaceChildren(formulaire()) }, "Modifier"),
-      h("button", { type: "button", class: "btn btn-danger", onclick: supprimer }, "Supprimer"),
-      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => zone.replaceChildren(ficheAcces({ patient: p })) }, "Réimprimer la fiche d'accès"),
-      h("button", { type: "button", class: "btn btn-secondaire", onclick: nouveauQr }, "Régénérer le QR code"),
-    );
+export function patient(params) {
+  if (role() !== "medecin" && role() !== "infirmier") return interdit();
+  if (!params?.id) return introuvable();
+  const racine = h("div", { class: "pile" });
+  const vivant = suivi();
+  let fiche = null;
+  let consultations = [];
+  let editer = false;
+  let montrerFiche = false;
+  let trace = false;
+  racine.append(squelettes());
+  void charger();
+  return racine;
+
+  async function charger() {
+    try {
+      fiche = await getPatient(params.id);
+      if (!trace) {
+        trace = true;
+        await logAccess(fiche.id, "consultation");
+      }
+      consultations = await listConsultations(fiche.id);
+      if (!vivant()) return;
+      peindre();
+    } catch (error) {
+      if (!vivant()) return;
+      monter(racine, [alerte("Erreur", message(error)), h("a", { class: "btn btn-secondaire", href: "#/patients" }, "Retour aux patients")]);
+    }
   }
-  function formulaire() {
-    const nom = h("input", { type: "text" });
-    nom.value = p.nom_complet;
-    const sexe = choix([["M", "Homme"], ["F", "Femme"]], p.sexe);
-    const date = h("input", { type: "date" });
-    date.value = p.date_naissance || "";
-    const telephone = h("input", { type: "tel" });
-    telephone.value = p.telephone || "";
-    const adresse = h("input", { type: "text" });
-    adresse.value = p.adresse || "";
-    const groupe = choix([["", "Non renseigné"], ...GROUPES.map((g) => [g, g])], p.groupe_sanguin || "");
-    const form = h("form", { class: "carte pile" }, [
-      h("h2", {}, "Modifier la fiche"),
-      champ("Nom complet", nom),
-      champ("Sexe", sexe),
-      champ("Date de naissance", date),
-      champ("Téléphone", telephone),
-      champ("Adresse", adresse),
-      champ("Groupe sanguin", groupe),
-      h("div", { class: "rangee" }, [
-        h("button", { class: "btn btn-primaire", type: "submit" }, "Enregistrer"),
-        h("button", { class: "btn btn-secondaire", type: "button", onclick: () => zone.replaceChildren() }, "Annuler"),
+
+  function peindre() {
+    const medecin = role() === "medecin";
+    const atcd = normaliserAntecedents(fiche.antecedents);
+    const actions = [];
+    if (medecin) {
+      actions.push(h("a", { class: "btn btn-primaire", href: `${lienPatient(fiche.id)}/consultation` }, "Nouvelle consultation"));
+      actions.push(h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: () => { editer = !editer; peindre(); } }, editer ? "Fermer la modification" : "Modifier l'identité"));
+      actions.push(h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: () => { montrerFiche = !montrerFiche; peindre(); } }, montrerFiche ? "Masquer la fiche" : "Fiche d'accès"));
+      actions.push(h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: () => { void regenerer(); } }, "Régénérer le QR code"));
+      actions.push(h("button", { type: "button", class: "btn btn-danger no-print", onclick: () => { void supprimer(); } }, "Supprimer le dossier"));
+      actions.push(h("a", { class: "btn btn-secondaire no-print", href: "#/journal" }, "Journal des accès"));
+    }
+    actions.push(h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: () => window.print() }, "Imprimer"));
+
+    monter(racine, [
+      h("h1", {}, fiche.nom_complet),
+      h("div", { class: "meta" }, [
+        h("span", { class: "badge" }, libelleSexe(fiche.sexe)),
+        h("span", { class: "badge" }, libelleAge(fiche.date_naissance)),
+        fiche.groupe_sanguin ? h("span", { class: "badge" }, fiche.groupe_sanguin) : null,
+      ]),
+      h("div", { class: "rangee no-print" }, actions),
+      editer && medecin
+        ? formulaireIdentite(fiche, "Enregistrer l'identité", async (fields) => {
+          await updatePatient(fiche.id, fields);
+          await logAccess(fiche.id, "modification");
+          editer = false;
+          toast("Identité enregistrée.", "succes");
+          await charger();
+        }, () => { editer = false; peindre(); })
+        : null,
+      montrerFiche && medecin ? ficheAcces({ patient: fiche, motDePasse: "" }) : null,
+      h("section", { class: "carte carte-forte pile" }, [
+        h("h2", {}, "Allergies"),
+        h("p", {}, atcd.allergies),
+      ]),
+      h("section", { class: "pile" }, [
+        h("h2", {}, "Identité"),
+        info("Date de naissance", fiche.date_naissance ? formatDateLongue(fiche.date_naissance) : ""),
+        info("Téléphone", fiche.telephone),
+        info("Adresse", fiche.adresse),
+        medecin ? info("Identifiant patient", fiche.identifiant) : null,
+      ]),
+      h("section", { class: "pile" }, [
+        h("h2", {}, "Antécédents"),
+        blocAntecedents(atcd),
+      ]),
+      h("section", { class: "pile" }, [
+        h("h2", {}, "Consultations"),
+        consultations.length
+          ? consultations.map((item) => carteConsultation(item, medecin))
+          : vide("Aucune consultation", medecin
+            ? "Dictez une première consultation pour ce dossier."
+            : "Aucune consultation validée n'est disponible."),
       ]),
     ]);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      await updatePatient(id, {
-        nom_complet: nom.value,
-        sexe: sexe.value,
-        date_naissance: date.value,
-        telephone: telephone.value,
-        adresse: adresse.value,
-        groupe_sanguin: groupe.value,
-      });
-      await logAccess(id, "modification");
-      toast("Fiche mise à jour.", "succes");
-      location.reload();
-    });
-    return form;
   }
+
+  function carteConsultation(item, medecin) {
+    const motif = item.dossier?.motif_consultation || "Consultation";
+    const lire = item.valide
+      ? `#/patients/${encodeURIComponent(fiche.id)}/dossier/${encodeURIComponent(item.id)}`
+      : `#/patients/${encodeURIComponent(fiche.id)}/consultation/${encodeURIComponent(item.id)}`;
+    return h("article", { class: "carte pile" }, [
+      h("div", { class: "rangee" }, [
+        h("strong", {}, formatDateLongue(item.created_at) || "Consultation"),
+        badgeStatut(Boolean(item.valide)),
+      ]),
+      h("p", {}, motif),
+      h("div", { class: "rangee no-print" }, [
+        h("a", { class: "btn btn-secondaire", href: lire }, item.valide ? "Lire" : "Reprendre"),
+        medecin && item.valide
+          ? h("a", { class: "btn btn-secondaire", href: `#/patients/${encodeURIComponent(fiche.id)}/consultation/${encodeURIComponent(item.id)}` }, "Modifier")
+          : null,
+      ]),
+    ]);
+  }
+
+  async function regenerer() {
+    const ok = await confirmer({
+      titre: "Régénérer le QR code",
+      message: "L'ancienne fiche imprimée ne permettra plus d'ouvrir ce dossier.",
+      confirmer: "Régénérer",
+      danger: true,
+    });
+    if (!ok || !vivant()) return;
+    try {
+      const token = await regenererQr(fiche.id);
+      fiche = { ...fiche, qr_token: token };
+      await logAccess(fiche.id, "modification");
+      montrerFiche = true;
+      if (!vivant()) return;
+      peindre();
+      toast("QR code régénéré.", "succes");
+    } catch (error) {
+      if (vivant()) toast(message(error), "erreur");
+    }
+  }
+
   async function supprimer() {
     const ok = await confirmer({
-      titre: "Supprimer ce dossier ?",
-      message: "La fiche et les consultations seront supprimées. Cette action est tracée.",
+      titre: "Supprimer le dossier",
+      message: "Le dossier, les consultations et le compte patient seront supprimés. Le journal conservera la trace.",
       confirmer: "Supprimer",
       danger: true,
     });
-    if (!ok) return;
-    await logAccess(id, "suppression");
-    await supprimerPatient(id);
-    toast("Dossier supprimé.", "succes");
-    location.hash = "#/patients";
+    if (!ok || !vivant()) return;
+    try {
+      await logAccess(fiche.id, "suppression");
+      await supprimerPatient(fiche.id);
+      aller("#/patients");
+    } catch (error) {
+      if (vivant()) toast(message(error), "erreur");
+    }
   }
-  async function nouveauQr() {
-    const ok = await confirmer({
-      titre: "Régénérer le QR code ?",
-      message: "L'ancien QR code ne fonctionnera plus.",
-      confirmer: "Régénérer",
-    });
-    if (!ok) return;
-    const token = await regenererQr(id);
-    await logAccess(id, "modification");
-    p.qr_token = token;
-    zone.replaceChildren(ficheAcces({ patient: p }));
-  }
-  const derniere = consultations[0];
-  let journal = null;
-  if (estMedecin()) {
-    const data = await listerJournal({ patientId: id, limit: 20 });
-    journal = h("section", { class: "pile" }, [
-      h("h2", {}, "Journal d'accès"),
-      data.lignes.length ? tableauJournal(data.lignes) : h("p", {}, "Aucun accès enregistré."),
-      h("a", { href: "#/journal" }, "Tout le journal"),
-    ]);
-  }
-  return h("div", { class: "pile" }, [
-    h("p", { class: "print-only" }, "MediVoix — Dossier patient"),
-    h("h1", {}, p.nom_complet),
-    h("div", { class: "meta" }, [
-      h("span", { class: "badge" }, libelleAge(p.date_naissance)),
-      h("span", { class: "badge" }, libelleSexe(p.sexe)),
-      h("span", { class: "badge" }, p.groupe_sanguin || "Groupe non renseigné"),
-    ]),
-    h("p", {}, [p.telephone, p.adresse].filter(Boolean).join(" · ") || "Coordonnées non renseignées"),
-    actions,
-    zone,
-    h("section", { class: "carte pile" }, [h("h2", {}, "Antécédents"), blocAntecedents(p.antecedents)]),
-    derniere ? h("a", { class: "carte carte-vert", href: `#/patients/${id}/dossier/${derniere.id}` }, [
-      h("h2", {}, "Dernière consultation"),
-      h("p", {}, formatDateLongue(derniere.created_at)),
-      h("p", {}, derniere.dossier?.motif_consultation || "Motif non renseigné"),
-      badgeStatut(derniere.valide),
-    ]) : null,
-    h("section", { class: "pile" }, [
-      h("h2", {}, "Consultations"),
-      consultations.length ? h("div", { class: "pile" }, consultations.map((c) => h("a", { class: "carte", href: `#/patients/${id}/dossier/${c.id}` }, [
-        h("strong", {}, formatDateLongue(c.created_at)),
-        h("p", {}, c.dossier?.motif_consultation || "Motif non renseigné"),
-        badgeStatut(c.valide),
-      ]))) : vide("Aucune consultation", "Le dossier clinique commencera à la première dictée."),
-    ]),
-    journal,
-  ]);
-}
-
-function tableauJournal(lignes) {
-  return h("div", { class: "table-scroll" }, [
-    h("table", {}, [
-      h("thead", {}, [h("tr", {}, ["Date et heure", "Utilisateur", "Rôle", "Patient", "Action"].map((t) => h("th", {}, t)))]),
-      h("tbody", {}, lignes.map((l) => h("tr", {}, [
-        h("td", {}, formatDateHeure(l.created_at)),
-        h("td", {}, l.auteur_nom || "Compte supprimé"),
-        h("td", {}, libelleRole(l.role)),
-        h("td", {}, l.patient_nom || "Patient supprimé"),
-        h("td", {}, libelleAction(l.action)),
-      ]))),
-    ]),
-  ]);
 }
 
 export function consultation(params) {
-  return ecranConsultation(params);
-}
-export function edition(params) {
-  return ecranConsultation(params);
-}
+  if (role() !== "medecin") return interdit();
+  if (!params?.id) return introuvable();
+  const racine = h("div", { class: "pile avec-barre" });
+  const vivant = suivi();
+  racine.append(squelettes());
+  void charger();
+  return racine;
 
-async function ecranConsultation({ id, cid }) {
-  const p = await getPatient(id);
-  const existante = cid ? await getConsultation(cid) : null;
-  const age = ageAns(p.date_naissance);
-  let dossier = existante?.dossier ? normalizeDossier(existante.dossier, { conserverAcceptation: true }) : null;
-  let source = null;
-  let micro = null;
-  let debutForce = existante ? Date.now() : null;
-  const etape = h("div", { class: "pile" });
-  const barre = h("div", { class: "barre-fixe no-print" });
-  const root = h("div", { class: "pile avec-barre" });
-  const micHost = h("div");
-
-  function debut() {
-    return micro?.getStartedAt() || debutForce;
-  }
-
-  function monterDictee() {
-    barre.replaceChildren();
-    etape.replaceChildren(
-      h("details", {}, [
-        h("summary", {}, "Antécédents connus"),
-        blocAntecedents(normaliserAntecedents(p.antecedents)),
-      ]),
-      h("p", { class: "aide" }, "Dictez uniquement ce que vous avez trouvé. Les systèmes non mentionnés seront pré-remplis normaux."),
-      micHost,
-      h("div", { class: "rangee" }, [
-        h("button", { type: "button", class: "btn btn-primaire", onclick: generer }, "Générer le dossier"),
-        h("button", { type: "button", class: "btn btn-secondaire", onclick: () => micro?.setText(EXEMPLE_DICTEE) }, "Insérer un exemple"),
-      ]),
-    );
-    if (!micro) micro = mountMic(micHost);
-    else micHost.replaceChildren();
-    if (!micHost.childElementCount) micro = mountMic(micHost);
-    if (existante?.dictee && !micro.getText()) micro.setText(existante.dictee);
-  }
-
-  async function generer() {
-    micro?.stop();
-    await new Promise((r) => setTimeout(r, 300));
-    const texte = micro?.getText().trim() || "";
-    if (!texte) {
-      etape.append(alerte("À compléter", "Dictez ou saisissez le texte avant de générer."));
-      return;
-    }
-    etape.replaceChildren(squelettes(6), h("p", {}, "Rédaction du dossier en cours…"));
+  async function charger() {
     try {
-      const resultat = await generateDossier(texte, { age, sex: p.sexe }, normaliserAntecedents(p.antecedents));
-      dossier = normalizeDossier(resultat.dossier, { conserverAcceptation: true });
-      source = resultat.source || null;
-      montrerDossier(texte);
-    } catch (e) {
-      etape.replaceChildren(
-        alerte("Erreur", e.message || "Génération impossible, réessayez."),
+      const personne = await getPatient(params.id);
+      let existante = null;
+      if (params.cid) {
+        existante = await getConsultation(params.cid);
+        if (existante.patient_id !== personne.id) throw new Error("Consultation introuvable.");
+      }
+      await logAccess(personne.id, "consultation");
+      if (!vivant()) return;
+      monterEditeur(personne, existante);
+    } catch (error) {
+      if (!vivant()) return;
+      monter(racine, [alerte("Erreur", message(error)), lienRetour(params.id)]);
+    }
+  }
+
+  function monterEditeur(personne, existante) {
+    speech.reset();
+    let dossier = existante?.dossier
+      ? normalizeDossier(existante.dossier, { conserverAcceptation: true })
+      : null;
+    let identifiantConsultation = existante?.id || "";
+    const dureeBase = Number(existante?.duree_secondes) || 0;
+    const zoneDictee = h("div");
+    const micro = mountMic(zoneDictee, {});
+    window.addEventListener("medivoix-leave", () => micro.destroy(), { once: true });
+    if (existante?.dictee) micro.setText(existante.dictee);
+    const zoneManquants = h("div");
+    const zoneEditeur = h("div", { class: "pile" });
+    const zoneSource = h("p", { class: "aide" }, "Seules les lignes cochées « Retenir » seront enregistrées.");
+    const erreur = h("div");
+    const brouillon = h("button", {
+      type: "button",
+      class: "btn btn-secondaire",
+      disabled: !dossier,
+      onclick: () => { void enregistrer(false); },
+    }, "Enregistrer le brouillon");
+    const valider = h("button", {
+      type: "button",
+      class: "btn btn-succes",
+      disabled: !dossier,
+      onclick: () => { void enregistrer(true); },
+    }, "Valider la consultation");
+    const boutonGenerer = h("button", {
+      type: "button",
+      class: "btn btn-primaire",
+      onclick: () => { void generer(); },
+    }, "Rédiger le dossier");
+    const boutonSupprimer = h("button", {
+      type: "button",
+      class: "btn btn-danger no-print",
+      hidden: !identifiantConsultation,
+      onclick: () => { void supprimer(); },
+    }, "Supprimer la consultation");
+
+    if (dossier) peindreDossier(dossier, "enregistrée");
+
+    monter(racine, [
+      h("h1", {}, existante ? "Reprendre la consultation" : "Nouvelle consultation"),
+      h("p", {}, `${personne.nom_complet} · ${libelleSexe(personne.sexe)} · ${libelleAge(personne.date_naissance)}`),
+      h("div", { class: "rangee" }, [lienRetour(personne.id), boutonSupprimer]),
+      h("section", { class: "pile" }, [
+        h("h2", {}, "Dictée"),
+        estLocal()
+          ? h("p", { class: "aide" }, "Mode local : le dossier est rédigé sur cet appareil, sans modèle distant.")
+          : h("p", { class: "aide" }, "La dictée est transmise à la rédaction de la clinique, puis relue ici."),
+        zoneDictee,
         h("div", { class: "rangee" }, [
-          h("button", { type: "button", class: "btn btn-primaire", onclick: generer }, "Réessayer"),
-          h("button", { type: "button", class: "btn btn-secondaire", onclick: monterDictee }, "Revenir à la dictée"),
+          h("button", {
+            type: "button",
+            class: "btn btn-secondaire",
+            onclick: () => micro.setText(EXEMPLE_DICTEE),
+          }, "Insérer l'exemple de dictée"),
+          boutonGenerer,
         ]),
+      ]),
+      erreur,
+      zoneSource,
+      zoneManquants,
+      zoneEditeur,
+      h("div", { class: "barre-fixe" }, [brouillon, valider]),
+    ]);
+
+    function peindreDossier(valeur, source) {
+      dossier = valeur;
+      brouillon.disabled = false;
+      valider.disabled = false;
+      zoneEditeur.replaceChildren(editeurDossier(dossier));
+      zoneManquants.replaceChildren(
+        ...(dossier.elements_manquants.length ? [alerte("À compléter", dossier.elements_manquants)] : []),
       );
+      const precision = source === "local"
+        ? "Rédaction locale. Relisez chaque ligne avant de valider."
+        : source === "enregistrée"
+          ? "Dossier déjà enregistré. Relisez-le avant de valider."
+          : "Proposition générée. Relisez chaque ligne avant de valider.";
+      zoneSource.textContent = `Seules les lignes cochées « Retenir » seront enregistrées. ${precision}`;
+    }
+
+    function dureeActuelle() {
+      const debut = micro.getStartedAt();
+      if (!debut) return dureeBase;
+      return dureeBase + Math.round((Date.now() - debut) / 1000);
+    }
+
+    async function generer() {
+      const texte = micro.getText().trim();
+      if (!texte) {
+        erreur.replaceChildren(alerte("À compléter", "La dictée est vide."));
+        return;
+      }
+      if (texte.length > 6000) {
+        erreur.replaceChildren(alerte("À compléter", "La dictée dépasse 6000 caractères."));
+        return;
+      }
+      if (dossier) {
+        const ok = await confirmer({
+          titre: "Régénérer le dossier",
+          message: "La proposition actuelle sera remplacée. Les cases cochées seront perdues.",
+          confirmer: "Régénérer",
+        });
+        if (!ok || !vivant()) return;
+      }
+      erreur.replaceChildren();
+      boutonGenerer.disabled = true;
+      boutonGenerer.textContent = "Rédaction en cours…";
+      try {
+        const resultat = await generateDossier(texte, {
+          age: ageAns(personne.date_naissance),
+          sexe: personne.sexe,
+          sex: personne.sexe,
+        }, normaliserAntecedents(personne.antecedents));
+        if (!vivant()) return;
+        peindreDossier(normalizeDossier(resultat.dossier), resultat.source || "ia");
+        toast("Dossier proposé. Relisez-le avant de valider.", "succes");
+      } catch (error) {
+        if (vivant()) erreur.replaceChildren(alerte("Erreur", message(error)));
+      } finally {
+        boutonGenerer.disabled = false;
+        boutonGenerer.textContent = "Rédiger le dossier";
+      }
+    }
+
+    async function enregistrer(valide) {
+      if (!dossier || !vivant()) return;
+      micro.stop();
+      if (valide && dossier.elements_manquants.length) {
+        const n = dossier.elements_manquants.length;
+        const ok = await confirmer({
+          titre: "Éléments manquants",
+          message: n > 1
+            ? `${n} éléments restent à compléter. Valider quand même ?`
+            : "Un élément reste à compléter. Valider quand même ?",
+          confirmer: "Valider quand même",
+        });
+        if (!ok || !vivant()) return;
+      }
+      brouillon.disabled = true;
+      valider.disabled = true;
+      try {
+        const propre = dossierPourEnregistrement(dossier);
+        const row = await saveConsultation({
+          id: identifiantConsultation || undefined,
+          patientId: personne.id,
+          dictee: micro.getText().trim(),
+          dossier: propre,
+          dureeSecondes: dureeActuelle(),
+          valide,
+        });
+        identifiantConsultation = row.id;
+        boutonSupprimer.hidden = false;
+        if (valide) {
+          const fusion = fusionnerAntecedents(personne.antecedents, propre.antecedents);
+          await updatePatient(personne.id, { antecedents: fusion });
+          personne.antecedents = fusion;
+          await logAccess(personne.id, "validation");
+          if (!vivant()) return;
+          toast("Consultation validée.", "succes");
+          aller(`#/patients/${encodeURIComponent(personne.id)}/dossier/${encodeURIComponent(row.id)}`);
+          return;
+        }
+        await logAccess(personne.id, "modification");
+        const url = `#/patients/${encodeURIComponent(personne.id)}/consultation/${encodeURIComponent(row.id)}`;
+        if (location.hash !== url) history.replaceState(null, "", url);
+        document.title = "Consultation — MediVoix";
+        if (vivant()) toast(`Brouillon enregistré (${formatDuree(dureeActuelle())}).`, "succes");
+      } catch (error) {
+        if (vivant()) erreur.replaceChildren(alerte("Erreur", message(error)));
+      } finally {
+        if (vivant() && dossier) {
+          brouillon.disabled = false;
+          valider.disabled = false;
+        }
+      }
+    }
+
+    async function supprimer() {
+      if (!identifiantConsultation) return;
+      const ok = await confirmer({
+        titre: "Supprimer la consultation",
+        message: "Cette dictée et ce dossier seront retirés.",
+        confirmer: "Supprimer",
+        danger: true,
+      });
+      if (!ok || !vivant()) return;
+      try {
+        await logAccess(personne.id, "suppression");
+        await supprimerConsultation(identifiantConsultation);
+        aller(lienPatient(personne.id));
+      } catch (error) {
+        if (vivant()) erreur.replaceChildren(alerte("Erreur", message(error)));
+      }
     }
   }
-
-  function montrerDossier(texte) {
-    const notes = [];
-    if (source === "gemma") {
-      notes.push(h("div", { class: "carte carte-vert" }, [
-        h("strong", {}, "Gemma 4"),
-        h("p", {}, "Proposition rédigée par le modèle open-weight. Relisez chaque ligne. Rien n'est prescrit sans votre validation."),
-      ]));
-    }
-    if (source === "local") {
-      notes.push(h("div", { class: "carte carte-forte" }, [
-        h("strong", {}, "Relisez le dossier"),
-        h("p", {}, "Structuration locale : la clé Gemma 4 est absente. Vérifiez chaque ligne avant de valider."),
-      ]));
-    }
-    if (dossier.elements_manquants?.length) notes.push(alerte("À compléter", dossier.elements_manquants));
-    barre.replaceChildren(
-      h("button", { type: "button", class: "btn btn-secondaire", onclick: () => enregistrer(false, texte) }, "Enregistrer en brouillon"),
-      h("button", { type: "button", class: "btn btn-succes", onclick: () => enregistrer(true, texte) }, "Valider le dossier"),
-    );
-    etape.replaceChildren(
-      ...notes,
-      h("p", { class: "chrono", id: "chrono-redaction" }, ""),
-      editeurDossier(dossier),
-      h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: monterDictee }, "Revenir à la dictée"),
-    );
-  }
-
-  async function enregistrer(valide, texte) {
-    const start = debut();
-    const session = start ? Math.round((Date.now() - start) / 1000) : 0;
-    const duree = (existante?.duree_secondes || 0) + session;
-    const pret = dossierPourEnregistrement(dossier);
-    const ligne = await saveConsultation({
-      id: existante?.id,
-      patientId: id,
-      dictee: texte || micro?.getText() || existante?.dictee || "",
-      dossier: pret,
-      dureeSecondes: duree,
-      valide,
-    });
-    if (valide) {
-      await updatePatient(id, { antecedents: fusionnerAntecedents(p.antecedents, pret.antecedents) });
-      await logAccess(id, "validation");
-      barre.remove();
-      root.classList.remove("avec-barre");
-      etape.replaceChildren(
-        h("p", { class: "succes-duree" }, `Dossier complété en ${formatDuree(duree)}`),
-        h("p", {}, "La décision enregistrée est la vôtre."),
-        h("div", { class: "rangee" }, [
-          h("a", { class: "btn btn-primaire", href: `#/patients/${id}/dossier/${ligne.id}` }, "Voir le dossier"),
-          h("a", { class: "btn btn-secondaire", href: "#/patients" }, "Retour aux patients"),
-        ]),
-      );
-      return;
-    }
-    await logAccess(id, "modification");
-    toast("Brouillon enregistré.", "succes");
-    location.hash = `#/patients/${id}/dossier/${ligne.id}`;
-  }
-
-  root.addEventListener("medivoix-leave", () => micro?.destroy());
-  root.append(
-    h("h1", {}, existante ? "Reprendre la consultation" : "Nouvelle consultation"),
-    h("p", {}, `${p.nom_complet} · ${libelleAge(p.date_naissance)} · ${libelleSexe(p.sexe)}`),
-    etape,
-    barre,
-  );
-  if (dossier) montrerDossier(existante.dictee || "");
-  else monterDictee();
-  const minuteur = setInterval(() => {
-    const noeud = root.querySelector("#chrono-redaction");
-    const start = debut();
-    if (noeud && start) noeud.textContent = `Rédaction : ${formatDuree(Math.round((Date.now() - start) / 1000))}`;
-  }, 500);
-  root.addEventListener("medivoix-leave", () => clearInterval(minuteur));
-  return root;
 }
 
-export async function dossier({ id, cid }) {
-  const p = await getPatient(id);
-  const c = await getConsultation(cid);
-  await logAccess(id, "consultation");
-  const actions = h("div", { class: "rangee no-print" });
-  actions.append(h("button", { type: "button", class: "btn btn-secondaire", onclick: () => window.print() }, "Imprimer"));
-  if (estMedecin()) {
-    actions.append(
-      h("a", { class: "btn btn-primaire", href: `#/patients/${id}/consultation/${cid}` }, "Modifier"),
-      h("button", { type: "button", class: "btn btn-danger", onclick: async () => {
-        const ok = await confirmer({
-          titre: "Supprimer cette consultation ?",
-          message: "La suppression est tracée dans le journal.",
-          confirmer: "Supprimer",
-          danger: true,
-        });
-        if (!ok) return;
-        await logAccess(id, "suppression");
-        await supprimerConsultation(cid);
-        location.hash = `#/patients/${id}`;
-      } }, "Supprimer"),
-    );
+export function edition(params) {
+  return consultation(params);
+}
+
+export function dossier(params) {
+  if (role() !== "medecin" && role() !== "infirmier") return interdit();
+  if (!params?.id || !params?.cid) return introuvable();
+  const racine = h("div", { class: "pile" });
+  const vivant = suivi();
+  racine.append(squelettes());
+  void charger();
+  return racine;
+
+  async function charger() {
+    try {
+      const [personne, item] = await Promise.all([
+        getPatient(params.id),
+        getConsultation(params.cid),
+      ]);
+      if (item.patient_id !== personne.id) throw new Error("Consultation introuvable.");
+      await logAccess(personne.id, "consultation");
+      if (!vivant()) return;
+      const contenu = normalizeDossier(item.dossier, { conserverAcceptation: true });
+      const medecin = role() === "medecin";
+      monter(racine, [
+        h("div", { class: "rangee" }, [
+          h("h1", {}, contenu.motif_consultation || "Consultation"),
+          badgeStatut(Boolean(item.valide)),
+        ]),
+        h("p", {}, `${personne.nom_complet} · ${formatDateLongue(item.created_at)} · ${formatDuree(item.duree_secondes)}`),
+        h("div", { class: "rangee no-print" }, [
+          lienRetour(personne.id),
+          h("button", { type: "button", class: "btn btn-secondaire", onclick: () => window.print() }, "Imprimer"),
+          medecin
+            ? h("a", { class: "btn btn-secondaire", href: `#/patients/${encodeURIComponent(personne.id)}/consultation/${encodeURIComponent(item.id)}` }, "Modifier")
+            : null,
+          medecin
+            ? h("button", { type: "button", class: "btn btn-danger", onclick: () => { void supprimer(personne, item); } }, "Supprimer")
+            : null,
+        ]),
+        contenu.elements_manquants.length ? alerte("À compléter", contenu.elements_manquants) : null,
+        lectureDossier(contenu),
+        h("section", { class: "pile" }, [
+          h("h2", {}, "Dictée d'origine"),
+          h("p", {}, item.dictee || "Non renseignée"),
+        ]),
+      ]);
+    } catch (error) {
+      if (!vivant()) return;
+      monter(racine, [alerte("Erreur", message(error)), lienRetour(params.id)]);
+    }
   }
-  return h("div", { class: "pile feuille" }, [
-    h("p", { class: "print-only" }, "MediVoix — Dossier médical"),
-    h("h1", {}, p.nom_complet),
-    h("div", { class: "meta" }, [
-      badgeStatut(c.valide),
-      h("span", {}, formatDateLongue(c.created_at)),
-      h("span", {}, `Rédigé en ${formatDuree(c.duree_secondes)}`),
-    ]),
-    actions,
-    lectureDossier(c.dossier),
-  ]);
+
+  async function supprimer(personne, item) {
+    const ok = await confirmer({
+      titre: "Supprimer la consultation",
+      message: "Cette dictée et ce dossier seront retirés.",
+      confirmer: "Supprimer",
+      danger: true,
+    });
+    if (!ok || !vivant()) return;
+    try {
+      await logAccess(personne.id, "suppression");
+      await supprimerConsultation(item.id);
+      aller(lienPatient(personne.id));
+    } catch (error) {
+      if (vivant()) toast(message(error), "erreur");
+    }
+  }
 }
 
 export function scanner() {
-  const root = h("div", { class: "pile" });
-  const video = document.createElement("video");
+  if (role() !== "medecin" && role() !== "infirmier") return interdit();
+  const video = h("video", {
+    muted: true,
+    autoplay: true,
+    playsinline: true,
+    "aria-label": "Aperçu de la caméra pour le QR code",
+  });
   video.muted = true;
   video.playsInline = true;
-  video.autoplay = true;
-  const message = h("p", { class: "aide" }, "Placez le QR code de la fiche d'accès dans le cadre.");
-  const manuel = h("input", { class: "saisie", "aria-label": "Lien ou jeton" });
-  const camera = h("div", { class: "cadre-video" }, [video]);
+  const statut = h("p", { class: "aide", "aria-live": "polite" }, "Aucune image n'est enregistrée. Le QR code ne contient pas de donnée médicale.");
+  const saisie = h("input", { id: "saisie-jeton", type: "text", autocomplete: "off", spellcheck: "false" });
+  const erreur = h("div");
+  const canvas = document.createElement("canvas");
   let stream = null;
-  let timer = null;
-  let fini = false;
+  let timer = 0;
+  let actif = false;
+  let lecture = false;
   let detecteur = null;
-  try {
-    if ("BarcodeDetector" in window) detecteur = new BarcodeDetector({ formats: ["qr_code"] });
-  } catch { detecteur = null; }
-  const toile = document.createElement("canvas");
-
-  function stop() {
-    fini = true;
-    if (timer) cancelAnimationFrame(timer);
-    stream?.getTracks().forEach((piste) => piste.stop());
-    stream = null;
-  }
-
-  function traiter(brut, strict) {
-    const token = lireJeton(brut, location.origin, { strict });
-    if (!token) {
-      message.textContent = "Ce contenu n'est pas un QR code MediVoix. Seul le QR code d'une fiche d'accès est reconnu.";
-      return false;
+  if (typeof globalThis.BarcodeDetector === "function") {
+    try {
+      detecteur = new globalThis.BarcodeDetector({ formats: ["qr_code"] });
+    } catch {
+      detecteur = null;
     }
-    stop();
-    location.hash = `#/p/${token}`;
-    return true;
   }
 
-  async function boucle() {
-    if (fini || video.readyState < 2) {
-      timer = requestAnimationFrame(boucle);
+  function arreter() {
+    actif = false;
+    clearInterval(timer);
+    timer = 0;
+    if (stream) {
+      for (const piste of stream.getTracks()) piste.stop();
+      stream = null;
+    }
+  }
+
+  function quitter() {
+    arreter();
+    window.removeEventListener("pagehide", arreter);
+  }
+
+  window.addEventListener("medivoix-leave", quitter, { once: true });
+  window.addEventListener("pagehide", arreter);
+
+  async function activer() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      statut.textContent = "Caméra indisponible sur ce navigateur. Collez le lien ou le jeton.";
       return;
     }
     try {
-      if (detecteur) {
-        const codes = await detecteur.detect(video);
-        if (codes[0]?.rawValue && traiter(codes[0].rawValue, true)) return;
-      } else if (window.jsQR && video.videoWidth) {
-        toile.width = video.videoWidth;
-        toile.height = video.videoHeight;
-        const ctx = toile.getContext("2d", { willReadFrequently: true });
-        ctx.drawImage(video, 0, 0);
-        const image = ctx.getImageData(0, 0, toile.width, toile.height);
-        const code = window.jsQR(image.data, toile.width, toile.height, { inversionAttempts: "dontInvert" });
-        if (code?.data && traiter(code.data, true)) return;
+      const flux = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: "environment" },
+      });
+      if (!document.body.contains(video)) {
+        for (const piste of flux.getTracks()) piste.stop();
+        return;
       }
-    } catch { /* image pas prête */ }
-    timer = requestAnimationFrame(boucle);
+      arreter();
+      stream = flux;
+      actif = true;
+      video.srcObject = stream;
+      await video.play();
+      statut.textContent = "Caméra active. Présentez le QR code de la fiche.";
+      timer = window.setInterval(() => { void tic(); }, 250);
+    } catch {
+      statut.textContent = "Caméra indisponible. Autorisez-la, ou collez le lien du QR code.";
+    }
   }
 
-  root.addEventListener("medivoix-leave", stop);
-  navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" }, audio: false })
-    .then((flux) => {
-      stream = flux;
-      video.srcObject = flux;
-      return video.play();
-    })
-    .then(() => boucle())
-    .catch(() => {
-      camera.replaceChildren(alerte("Erreur", "Caméra indisponible. Autorisez-la, ou collez le lien du QR code."));
-    });
+  async function lireCode() {
+    if (video.readyState < 2 || !video.videoWidth) return "";
+    if (detecteur) {
+      const codes = await detecteur.detect(video);
+      return codes?.[0]?.rawValue || "";
+    }
+    if (typeof globalThis.jsQR !== "function") return "";
+    const largeur = Math.min(video.videoWidth, 640);
+    const hauteur = Math.max(1, Math.round(video.videoHeight * (largeur / video.videoWidth)));
+    canvas.width = largeur;
+    canvas.height = hauteur;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, largeur, hauteur);
+    const image = ctx.getImageData(0, 0, largeur, hauteur);
+    return globalThis.jsQR(image.data, largeur, hauteur)?.data || "";
+  }
 
-  const form = h("form", { class: "pile" }, [
-    champ("Saisie de secours", manuel, "Collez le lien complet ou seulement le jeton."),
-    h("button", { class: "btn btn-primaire", type: "submit" }, "Ouvrir"),
+  async function tic() {
+    if (!actif || lecture) return;
+    lecture = true;
+    try {
+      const valeur = await lireCode();
+      if (!actif || !valeur) return;
+      const token = lireJeton(valeur, location.origin, { strict: true });
+      if (!token) {
+        statut.textContent = "Ce QR code ne correspond pas à un dossier MediVoix de cette clinique.";
+        return;
+      }
+      arreter();
+      aller(`#/p/${token}`);
+    } catch {
+      // Cette image ne contient pas de QR lisible.
+    } finally {
+      lecture = false;
+    }
+  }
+
+  return h("div", { class: "pile" }, [
+    h("h1", {}, "Scanner un QR code"),
+    h("p", {}, "Réservé au personnel soignant connecté. Le lien ne transporte qu'un jeton, jamais le dossier."),
+    h("div", { class: "cadre-video" }, [video]),
+    statut,
+    h("button", { type: "button", class: "btn btn-primaire", onclick: () => { void activer(); } }, "Activer la caméra"),
+    h("form", {
+      class: "pile",
+      novalidate: true,
+      onsubmit: (event) => {
+        event.preventDefault();
+        const token = lireJeton(saisie.value, location.origin, { strict: false });
+        if (!token) {
+          erreur.replaceChildren(alerte("QR code inutilisable", "Collez le lien complet du QR code, ou le jeton de 16 à 40 caractères."));
+          return;
+        }
+        arreter();
+        aller(`#/p/${token}`);
+      },
+    }, [
+      champ("Lien ou jeton", saisie, "Secours si la caméra n'est pas disponible."),
+      erreur,
+      h("button", { type: "submit", class: "btn btn-secondaire" }, "Ouvrir le dossier"),
+    ]),
   ]);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    traiter(manuel.value, false);
-  });
-  root.append(h("h1", {}, "Scanner un QR code"), message, camera, form);
-  return root;
 }
 
-export async function journal() {
-  const patients = await listPatients("");
-  const filtrePatient = choix([["", "Tous les patients"], ...patients.map((p) => [p.id, p.nom_complet])], "");
-  const filtreAction = choix([
-    ["", "Toutes les actions"],
-    ["consultation", "Consultation"],
-    ["scan", "Scan du QR code"],
-    ["creation", "Création"],
-    ["modification", "Modification"],
-    ["validation", "Validation"],
-    ["suppression", "Suppression"],
-  ], "");
-  const zone = h("div");
-  const piedPage = h("div", { class: "rangee" });
-  let page = 0;
-  const taille = 30;
-  async function charger() {
-    zone.replaceChildren(squelettes(3));
-    const data = await listerJournal({
-      patientId: filtrePatient.value,
-      action: filtreAction.value,
-      offset: page * taille,
-      limit: taille,
-    });
-    zone.replaceChildren(data.lignes.length ? tableauJournal(data.lignes) : vide("Journal vide", "Aucun accès ne correspond à ces filtres."));
-    piedPage.replaceChildren(
-      h("button", { type: "button", class: "btn btn-secondaire", disabled: page === 0, onclick: () => { page -= 1; charger(); } }, "Page précédente"),
-      h("span", {}, `Page ${page + 1}`),
-      h("button", { type: "button", class: "btn btn-secondaire", disabled: (page + 1) * taille >= data.total, onclick: () => { page += 1; charger(); } }, "Page suivante"),
-    );
-  }
-  filtrePatient.addEventListener("change", () => { page = 0; charger(); });
-  filtreAction.addEventListener("change", () => { page = 0; charger(); });
-  await charger();
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Journal d'accès"),
-    h("p", {}, "Qui a lu quoi, et quand. Ajout seulement : rien ne se modifie ni ne se supprime ici."),
-    h("div", { class: "grille-2" }, [
-      champ("Patient", filtrePatient),
-      champ("Action", filtreAction),
+export function journal() {
+  if (role() !== "medecin") return interdit();
+  const racine = h("div", { class: "pile" });
+  const liste = h("div");
+  const recherche = h("input", { type: "search", autocomplete: "off" });
+  const action = selectAction("");
+  const vivant = suivi();
+  let offset = 0;
+  let ticket = 0;
+
+  monter(racine, [
+    h("h1", {}, "Journal des accès"),
+    h("p", { class: "aide" }, "Les plus récentes d'abord. La recherche porte sur le nom du patient et du soignant, dans la page affichée."),
+    h("form", {
+      class: "pile",
+      novalidate: true,
+      onsubmit: (event) => {
+        event.preventDefault();
+        offset = 0;
+        void charger();
+      },
+    }, [
+      h("div", { class: "grille-2" }, [
+        champ("Action", action),
+        champ("Patient ou soignant", recherche),
+      ]),
+      h("button", { type: "submit", class: "btn btn-secondaire" }, "Filtrer"),
     ]),
-    zone,
-    piedPage,
+    liste,
   ]);
+  action.addEventListener("change", () => {
+    offset = 0;
+    void charger();
+  });
+  void charger();
+  return racine;
+
+  async function charger() {
+    const n = ++ticket;
+    liste.replaceChildren(squelettes());
+    try {
+      const data = await listerJournal({ action: action.value, offset, limit: PAGE_JOURNAL });
+      if (n !== ticket || !vivant()) return;
+      const q = plier(recherche.value.trim());
+      const lignes = data.lignes.filter((ligne) => !q || plier(`${ligne.patient_nom} ${ligne.auteur_nom}`).includes(q));
+      const total = data.total || 0;
+      const debut = total === 0 ? 0 : offset + 1;
+      const fin = Math.min(offset + data.lignes.length, total);
+      const suite = [];
+      suite.push(h("p", {}, total ? `${debut}–${fin} sur ${total}` : "Aucune trace"));
+      if (!lignes.length) {
+        suite.push(vide("Aucune trace", "Aucune ligne ne correspond à ces critères."));
+      } else {
+        suite.push(h("div", { class: "table-scroll" }, [
+          h("table", {}, [
+            h("thead", {}, [
+              h("tr", {}, ["Date", "Soignant", "Rôle", "Patient", "Action"].map((titre) => h("th", { scope: "col" }, titre))),
+            ]),
+            h("tbody", {}, lignes.map((ligne) => h("tr", {}, [
+              h("td", {}, formatDateHeure(ligne.created_at)),
+              h("td", {}, ligne.auteur_nom || "Non renseigné"),
+              h("td", {}, libelleRole(ligne.role)),
+              h("td", {}, ligne.patient_nom || "Non renseigné"),
+              h("td", {}, libelleAction(ligne.action)),
+            ]))),
+          ]),
+        ]));
+      }
+      suite.push(h("div", { class: "rangee" }, [
+        h("button", {
+          type: "button",
+          class: "btn btn-secondaire",
+          disabled: offset === 0,
+          onclick: () => { offset = Math.max(0, offset - PAGE_JOURNAL); void charger(); },
+        }, "Page précédente"),
+        h("button", {
+          type: "button",
+          class: "btn btn-secondaire",
+          disabled: offset + PAGE_JOURNAL >= total,
+          onclick: () => { offset += PAGE_JOURNAL; void charger(); },
+        }, "Page suivante"),
+      ]));
+      liste.replaceChildren(...suite);
+    } catch (error) {
+      if (n !== ticket || !vivant()) return;
+      liste.replaceChildren(alerte("Erreur", message(error)));
+    }
+  }
+}
+
+function selectAction(actuel) {
+  const select = h("select");
+  select.append(h("option", { value: "" }, "Toutes les actions"));
+  for (const cle of ["consultation", "scan", "creation", "modification", "validation", "suppression"]) {
+    select.append(h("option", { value: cle }, libelleAction(cle)));
+  }
+  select.value = actuel;
+  return select;
 }
 
 export function compte() {
   const user = utilisateurCourant();
-  const nom = h("input", { type: "text" });
-  nom.value = user.nom_affichage || "";
-  const mot = h("input", { type: "password", minlength: "8", autocomplete: "new-password" });
-  const erreur = h("div");
-  const form = h("form", { class: "pile" }, [
-    champ("Nom affiché", nom),
-    champ("Nouveau mot de passe", mot, "Laissez vide pour ne pas le changer. 8 caractères minimum."),
-    erreur,
-    h("button", { class: "btn btn-primaire", type: "submit" }, "Enregistrer"),
-  ]);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    erreur.replaceChildren();
-    try {
-      await majProfil({ nom_affichage: nom.value });
-      if (mot.value) {
-        if (mot.value.length < 8) throw new Error("Le mot de passe doit contenir au moins 8 caractères.");
-        await changerMotDePasse(mot.value);
-      }
-      toast("Compte mis à jour.", "succes");
-      mot.value = "";
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
-    }
-  });
+  if (!user || (user.role !== "medecin" && user.role !== "infirmier")) return interdit();
+  const nom = h("input", { type: "text", autocomplete: "name", value: user.nom_affichage || "" });
+  const erreurNom = h("div");
+  const boutonNom = h("button", { type: "submit", class: "btn btn-primaire" }, "Enregistrer le nom");
+  const nouveau = h("input", { type: "password", autocomplete: "new-password" });
+  const confirmation = h("input", { type: "password", autocomplete: "new-password" });
+  const erreurMot = h("div");
+  const boutonMot = h("button", { type: "submit", class: "btn btn-primaire" }, "Changer le mot de passe");
+
   return h("div", { class: "pile" }, [
-    h("h1", {}, "Mon compte"),
-    h("p", {}, `${libelleRole(user.role)} · ${user.email}`),
-    form,
+    h("h1", {}, "Compte"),
+    info("Rôle", libelleRole(user.role)),
+    info("E-mail", user.email),
+    h("form", {
+      class: "carte pile",
+      novalidate: true,
+      onsubmit: (event) => {
+        event.preventDefault();
+        void sauverNom();
+      },
+    }, [
+      h("h2", {}, "Nom affiché"),
+      champ("Nom", nom),
+      erreurNom,
+      boutonNom,
+    ]),
+    h("form", {
+      class: "carte pile",
+      novalidate: true,
+      onsubmit: (event) => {
+        event.preventDefault();
+        void sauverMot();
+      },
+    }, [
+      h("h2", {}, "Mot de passe"),
+      champ("Nouveau mot de passe", nouveau, "Au moins 8 caractères. La session ouverte confirme qu'il s'agit de vous."),
+      champ("Confirmation", confirmation),
+      erreurMot,
+      boutonMot,
+    ]),
   ]);
+
+  async function sauverNom() {
+    erreurNom.replaceChildren();
+    const valeur = nom.value.trim();
+    if (!valeur) {
+      erreurNom.append(alerte("À compléter", "Le nom affiché est obligatoire."));
+      return;
+    }
+    boutonNom.disabled = true;
+    try {
+      await majProfil({ nom_affichage: valeur });
+      toast("Nom mis à jour.", "succes");
+      aller("#/compte");
+    } catch (error) {
+      erreurNom.replaceChildren(alerte("Erreur", message(error)));
+      boutonNom.disabled = false;
+    }
+  }
+
+  async function sauverMot() {
+    erreurMot.replaceChildren();
+    if (nouveau.value.length < 8) {
+      erreurMot.append(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
+      return;
+    }
+    if (nouveau.value !== confirmation.value) {
+      erreurMot.append(alerte("À compléter", "Les deux mots de passe ne correspondent pas."));
+      return;
+    }
+    boutonMot.disabled = true;
+    try {
+      await changerMotDePasse(nouveau.value);
+      nouveau.value = "";
+      confirmation.value = "";
+      toast("Mot de passe mis à jour.", "succes");
+      boutonMot.disabled = false;
+    } catch (error) {
+      erreurMot.replaceChildren(alerte("Erreur", message(error)));
+      boutonMot.disabled = false;
+    }
+  }
 }
 
-export async function qr({ token }) {
+export function qr(params) {
   const user = utilisateurCourant();
   if (!user) {
-    sessionStorage.setItem("medivoix.next", `#/p/${token}`);
-    location.hash = "#/connexion";
-    return h("p", {}, "Redirection vers la connexion…");
+    try { sessionStorage.setItem(RETOUR, location.hash || "#/"); } catch { /* stockage indisponible */ }
+    aller("#/connexion");
+    return h("p", {}, "Connexion requise.");
   }
   if (user.role === "patient") {
     return h("div", { class: "pile" }, [
-      h("h1", {}, "Accès réservé au personnel soignant"),
-      h("p", {}, "Ce QR code ne peut être ouvert que par un médecin ou un infirmier connecté."),
-      h("a", { class: "btn btn-primaire", href: "mon-carnet.html" }, "Retour à mon carnet"),
+      h("h1", {}, "Accès réservé"),
+      alerte("Accès réservé", "Accès réservé au personnel soignant."),
     ]);
   }
-  try {
-    const p = await getPatientByQr(token);
-    await logAccess(p.id, "scan");
-    location.hash = `#/patients/${p.id}`;
-    return h("p", {}, "Ouverture du dossier…");
-  } catch (e) {
-    return alerte("Erreur", e.message);
+  if (user.role !== "medecin" && user.role !== "infirmier") return interdit();
+  const racine = h("div", { class: "pile" });
+  const vivant = suivi();
+  racine.append(squelettes(2));
+  void resoudre();
+  return racine;
+
+  async function resoudre() {
+    try {
+      const personne = await getPatientByQr(params.token);
+      await logAccess(personne.id, "scan");
+      if (!vivant()) return;
+      aller(lienPatient(personne.id));
+    } catch (error) {
+      if (!vivant()) return;
+      monter(racine, [alerte("Erreur", message(error))]);
+    }
   }
 }
 
 export function interdit() {
-  return alerte("Erreur", "Cette page est réservée à un autre rôle.");
+  return h("div", { class: "pile" }, [
+    h("h1", {}, "Accès refusé"),
+    alerte("Accès refusé", "Cette action n'est pas autorisée pour votre rôle."),
+    h("a", { class: "btn btn-primaire", href: "#/patients" }, "Retour aux patients"),
+  ]);
 }
 
 export function introuvable() {
   return h("div", { class: "pile" }, [
-    vide("Page introuvable", "Ce lien ne correspond à aucun écran de MediVoix."),
+    h("h1", {}, "Page introuvable"),
+    h("p", {}, "Cette adresse ne correspond à aucune page."),
     h("a", { class: "btn btn-primaire", href: "#/" }, "Retour à l'accueil"),
   ]);
 }

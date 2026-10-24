@@ -1,5 +1,11 @@
-import { ANTECEDENTS, normaliserAntecedents } from "./dossier.js";
-import { formatDateLongue, identifiantValide, libelleAge, libelleSexe } from "./format.js";
+import { normaliserAntecedents, normalizeDossier } from "./dossier.js";
+import {
+  formatDateLongue,
+  identifiantValide,
+  libelleAge,
+  libelleSexe,
+} from "./format.js";
+import { blocAntecedents } from "./rendu.js";
 import {
   changerIdentifiant,
   changerMotDePasse,
@@ -17,259 +23,445 @@ import { alerte, champ, h, squelettes, toast, vide } from "./ui.js";
 
 const ecran = document.querySelector("#ecran");
 let vue = "carnet";
+let generation = 0;
 
-function entete() {
+function message(error) {
+  return error?.message || "Opération impossible. Réessayez.";
+}
+
+function info(libelle, valeur) {
+  return h("p", {}, [h("strong", {}, `${libelle} : `), valeur || "Non renseigné"]);
+}
+
+function focusTitre() {
+  const titre = ecran.querySelector("h1");
+  if (!titre) return;
+  titre.setAttribute("tabindex", "-1");
+  titre.focus();
+}
+
+function peindre() {
+  const ticket = ++generation;
   const user = utilisateurCourant();
-  const liens = user
-    ? [
-      h("button", { type: "button", onclick: () => { vue = "carnet"; dessiner(); } }, "Carnet"),
-      h("button", { type: "button", onclick: () => { vue = "espace"; dessiner(); } }, "Mon espace"),
-      h("button", { type: "button", onclick: async () => { await signOut(); vue = "carnet"; dessiner(); } }, "Déconnexion"),
-    ]
-    : [];
-  return h("header", { class: "entete no-print" }, [
+  document.title = "Mon carnet de santé — MediVoix";
+  if (user && (user.role === "medecin" || user.role === "infirmier")) {
+    location.replace("/#/patients");
+    return;
+  }
+  const blocs = [];
+  if (estLocal()) {
+    blocs.push(h("p", {
+      class: "bandeau-demo",
+      role: "status",
+    }, "Mode démonstration locale : ce carnet reste dans ce navigateur."));
+  }
+  if (!user || user.role !== "patient") {
+    blocs.push(ecranConnexion());
+  } else if (user.doit_changer_identifiants) {
+    blocs.push(ecranChangement(user));
+  } else {
+    blocs.push(coquille(user, ticket));
+  }
+  ecran.replaceChildren(...blocs);
+  focusTitre();
+}
+
+function entete(user) {
+  const bouton = (nom, texte) => h("button", {
+    type: "button",
+    "aria-current": vue === nom ? "page" : null,
+    onclick: () => {
+      vue = nom;
+      peindre();
+    },
+  }, texte);
+  return h("header", { class: "entete" }, [
     h("div", { class: "entete-barre" }, [
-      h("a", { class: "logo", href: "mon-carnet.html" }, "MediVoix"),
-      h("span", { class: "qui" }, user ? (user.nom_affichage || "Patient") : "Mon carnet de santé"),
+      h("p", { class: "logo" }, "MediVoix"),
+      h("p", { class: "qui" }, user.nom_affichage || "Patient"),
+      h("nav", { class: "nav", "aria-label": "Espace patient" }, [
+        bouton("carnet", "Mon carnet"),
+        bouton("espace", "Mon espace"),
+        h("button", { type: "button", onclick: () => { void quitter(); } }, "Quitter"),
+      ]),
     ]),
-    liens.length ? h("nav", { class: "nav", "aria-label": "Espace patient" }, liens) : null,
   ]);
 }
 
-function coquille(contenu) {
-  const enfants = [entete()];
-  if (estLocal() && utilisateurCourant()) {
-    enfants.push(h("div", { class: "bandeau-demo no-print" }, "Mode démonstration : ce carnet reste sur cet appareil."));
+function enteteSimple() {
+  return h("header", { class: "entete" }, [
+    h("div", { class: "entete-barre" }, [
+      h("p", { class: "logo" }, "MediVoix"),
+      h("nav", { class: "nav", "aria-label": "Espace patient" }, [
+        h("button", { type: "button", onclick: () => { void quitter(); } }, "Quitter"),
+      ]),
+    ]),
+  ]);
+}
+
+async function quitter() {
+  try {
+    await signOut();
+  } catch (error) {
+    toast(message(error), "erreur");
+    return;
   }
-  enfants.push(h("main", { class: "contenu" }, [contenu]));
-  ecran.replaceChildren(...enfants);
-  ecran.focus();
+  vue = "carnet";
+  peindre();
 }
 
 function ecranConnexion() {
-  const identifiant = h("input", { type: "text", autocomplete: "username", required: "true", autocapitalize: "none" });
-  const mot = h("input", { type: "password", autocomplete: "current-password", required: "true" });
+  const identifiant = h("input", { id: "identifiant-patient", type: "text", autocomplete: "username", autocapitalize: "none" });
+  const mot = h("input", { id: "mot-de-passe-patient", type: "password", autocomplete: "current-password" });
   const erreur = h("div");
-  const form = h("form", { class: "pile" }, [
-    champ("Identifiant", identifiant, "Celui imprimé sur votre fiche d'accès."),
-    champ("Mot de passe", mot),
-    erreur,
-    h("button", { class: "btn btn-primaire btn-bloc", type: "submit" }, "Ouvrir mon carnet"),
+  const bouton = h("button", { type: "submit", class: "btn btn-primaire" }, "Ouvrir mon carnet");
+  return h("div", {}, [
+    h("header", { class: "entete" }, [
+      h("div", { class: "entete-barre" }, [
+        h("a", { class: "logo", href: "/" }, "MediVoix"),
+        h("nav", { class: "nav", "aria-label": "Navigation" }, [
+          h("a", { href: "/" }, "Accueil"),
+          h("a", { href: "/#/connexion" }, "Espace soignant"),
+        ]),
+      ]),
+    ]),
+    h("main", { class: "contenu" }, [
+      h("div", { class: "pile" }, [
+        h("h1", {}, "Mon carnet de santé"),
+        h("p", {}, "Utilisez l'identifiant et le mot de passe remis par la clinique. Aucun autre dossier n'est accessible depuis cet espace."),
+        h("form", {
+          class: "carte pile",
+          novalidate: true,
+          onsubmit: (event) => {
+            event.preventDefault();
+            void entrer();
+          },
+        }, [
+          champ("Identifiant", identifiant),
+          champ("Mot de passe", mot),
+          erreur,
+          bouton,
+        ]),
+      ]),
+    ]),
   ]);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+
+  async function entrer() {
     erreur.replaceChildren();
+    if (!identifiant.value.trim() || !mot.value) {
+      erreur.append(alerte("À compléter", "Indiquez l'identifiant et le mot de passe."));
+      return;
+    }
+    bouton.disabled = true;
     try {
-      await signInPatient(identifiant.value, mot.value);
+      const user = await signInPatient(identifiant.value, mot.value);
+      if (user.role !== "patient") {
+        location.replace("/#/patients");
+        return;
+      }
       vue = "carnet";
-      dessiner();
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
+      peindre();
+    } catch (error) {
+      erreur.replaceChildren(alerte("Erreur", message(error)));
+      bouton.disabled = false;
     }
+  }
+}
+
+function ecranChangement(user) {
+  const identifiant = h("input", {
+    id: "nouvel-identifiant",
+    type: "text",
+    autocomplete: "username",
+    autocapitalize: "none",
+    spellcheck: "false",
   });
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Mon carnet de santé"),
-    h("p", {}, "Vous ne voyez que les consultations que le médecin a validées."),
-    form,
-    h("p", {}, [h("a", { href: "index.html" }, "Retour à l'accueil")]),
-  ]);
-}
-
-function ecranChangement() {
-  const user = utilisateurCourant();
-  const identifiant = h("input", { type: "text", autocomplete: "username", autocapitalize: "none" });
-  identifiant.value = user.identifiant || "";
-  const mot = h("input", { type: "password", autocomplete: "new-password", minlength: "8", required: "true" });
-  const confirmation = h("input", { type: "password", autocomplete: "new-password", minlength: "8", required: "true" });
+  const mot = h("input", { id: "nouveau-mot-de-passe", type: "password", autocomplete: "new-password" });
+  const confirmation = h("input", { type: "password", autocomplete: "new-password" });
   const erreur = h("div");
-  const form = h("form", { class: "pile" }, [
-    champ("Nouvel identifiant", identifiant, "Lettres minuscules, chiffres et points. Laissez le vôtre si vous le gardez."),
-    champ("Nouveau mot de passe", mot, "8 caractères minimum."),
-    champ("Confirmer le mot de passe", confirmation),
-    erreur,
-    h("button", { class: "btn btn-succes btn-bloc", type: "submit" }, "Enregistrer mes accès"),
+  const bouton = h("button", { type: "submit", class: "btn btn-primaire" }, "Enregistrer mes identifiants");
+  return h("div", {}, [
+    enteteSimple(),
+    h("main", { class: "contenu" }, [
+      h("form", {
+        class: "pile",
+        novalidate: true,
+        onsubmit: (event) => {
+          event.preventDefault();
+          void enregistrer();
+        },
+      }, [
+        h("h1", {}, "Choisissez vos identifiants"),
+        h("p", {}, "Pour protéger votre carnet, remplacez l'identifiant et le mot de passe provisoires avant de continuer."),
+        info("Identifiant actuel", user.identifiant),
+        champ("Nouvel identifiant", identifiant, "Lettres minuscules, chiffres et points. Au moins 3 caractères, différent de l'identifiant provisoire."),
+        champ("Nouveau mot de passe", mot, "Au moins 8 caractères."),
+        champ("Confirmation", confirmation),
+        erreur,
+        bouton,
+      ]),
+    ]),
   ]);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    erreur.replaceChildren();
-    const propre = identifiant.value.trim().toLowerCase();
-    if (mot.value.length < 8) {
-      erreur.replaceChildren(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
-      return;
-    }
-    if (mot.value !== confirmation.value) {
-      erreur.replaceChildren(alerte("À compléter", "Les deux mots de passe ne correspondent pas."));
-      return;
-    }
-    if (propre && !identifiantValide(propre)) {
-      erreur.replaceChildren(alerte("À compléter", "Identifiant invalide. Lettres minuscules, chiffres, points, au moins 3 caractères."));
-      return;
-    }
-    try {
-      await changerMotDePasse(mot.value);
-      if (propre && propre !== user.identifiant) await changerIdentifiant(propre);
-      await majProfil({ doit_changer_identifiants: false });
-      toast("Accès mis à jour.", "succes");
-      vue = "carnet";
-      dessiner();
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
-    }
-  });
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Choisissez vos accès"),
-    h("p", {}, "Le mot de passe remis par la clinique est provisoire. Changez-le avant d'ouvrir le carnet."),
-    form,
-  ]);
-}
 
-function ligneAntecedent(label, valeur) {
-  return h("p", {}, [h("strong", {}, `${label} : `), valeur || "Non renseigné"]);
-}
-
-function consultationPatient(ligne) {
-  const dossier = ligne.dossier || {};
-  const traitements = Array.isArray(dossier.traitement_suggere) ? dossier.traitement_suggere : [];
-  const examens = Array.isArray(dossier.examens_complementaires) ? dossier.examens_complementaires : [];
-  return h("article", { class: "carte pile" }, [
-    h("h2", {}, formatDateLongue(ligne.created_at) || "Consultation"),
-    ligneAntecedent("Motif", dossier.motif_consultation),
-    h("p", {}, dossier.resume_patient || "Le médecin n'a pas laissé de résumé pour le patient."),
-    h("h3", {}, "Traitement retenu"),
-    traitements.length
-      ? h("ul", { class: "liste" }, traitements.map((t) => h("li", {}, `${t.molecule} — ${t.posologie} — ${t.duree}`)))
-      : h("p", {}, "Aucun médicament retenu."),
-    h("h3", {}, "Examens"),
-    examens.length
-      ? h("ul", { class: "liste" }, examens.map((item) => h("li", {}, item)))
-      : h("p", {}, "Aucun examen complémentaire noté."),
-    h("h3", {}, "Conduite à tenir"),
-    h("p", {}, dossier.conduite_a_tenir || "Non renseigné"),
-  ]);
-}
-
-function ecranEspace(patient) {
-  const user = utilisateurCourant();
-  const nom = h("input", { type: "text", autocomplete: "name" });
-  nom.value = user.nom_affichage || "";
-  const telephone = h("input", { type: "tel", autocomplete: "tel" });
-  telephone.value = patient.telephone || "";
-  const adresse = h("textarea", { rows: "3" });
-  adresse.value = patient.adresse || "";
-  const identifiant = h("input", { type: "text", autocomplete: "username", autocapitalize: "none" });
-  identifiant.value = patient.identifiant || user.identifiant || "";
-  const mot = h("input", { type: "password", autocomplete: "new-password", minlength: "8" });
-  const confirmation = h("input", { type: "password", autocomplete: "new-password", minlength: "8" });
-  const erreur = h("div");
-  const form = h("form", { class: "pile" }, [
-    champ("Nom affiché", nom),
-    champ("Téléphone", telephone),
-    champ("Adresse", adresse),
-    champ("Identifiant", identifiant),
-    champ("Nouveau mot de passe", mot, "Laissez vide pour ne pas le changer. 8 caractères minimum."),
-    champ("Confirmer le mot de passe", confirmation),
-    erreur,
-    h("button", { class: "btn btn-primaire", type: "submit" }, "Enregistrer"),
-  ]);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
+  async function enregistrer() {
     erreur.replaceChildren();
     const propre = identifiant.value.trim().toLowerCase();
     if (!identifiantValide(propre)) {
-      erreur.replaceChildren(alerte("À compléter", "Identifiant invalide. Lettres minuscules, chiffres, points, au moins 3 caractères."));
+      erreur.append(alerte("À compléter", "Identifiant invalide. Lettres minuscules, chiffres, points, au moins 3 caractères."));
       return;
     }
-    if (mot.value || confirmation.value) {
+    if (user.identifiant && propre === user.identifiant) {
+      erreur.append(alerte("À compléter", "Choisissez un identifiant différent de celui qui vous a été remis."));
+      return;
+    }
+    if (mot.value.length < 8) {
+      erreur.append(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
+      return;
+    }
+    if (mot.value !== confirmation.value) {
+      erreur.append(alerte("À compléter", "Les deux mots de passe ne correspondent pas."));
+      return;
+    }
+    bouton.disabled = true;
+    try {
+      await changerIdentifiant(propre);
+      await changerMotDePasse(mot.value);
+      await majProfil({ doit_changer_identifiants: false });
+      toast("Identifiants mis à jour.", "succes");
+      vue = "carnet";
+      peindre();
+    } catch (error) {
+      erreur.replaceChildren(alerte("Erreur", message(error)));
+      bouton.disabled = false;
+    }
+  }
+}
+
+function coquille(user, ticket) {
+  return h("div", {}, [
+    entete(user),
+    h("main", { class: "contenu" }, [
+      vue === "espace" ? espace(user, ticket) : carnet(ticket),
+    ]),
+  ]);
+}
+
+function carnet(ticket) {
+  const racine = h("div", { class: "pile" });
+  racine.append(h("h1", {}, "Mon carnet"), squelettes());
+  void charger();
+  return racine;
+
+  async function charger() {
+    try {
+      const fiche = await monDossier();
+      if (ticket !== generation) return;
+      const consultations = (await listConsultations(fiche.id)).filter((item) => item.valide);
+      if (ticket !== generation) return;
+      const atcd = normaliserAntecedents(fiche.antecedents);
+      racine.replaceChildren(
+        h("div", { class: "rangee" }, [
+          h("h1", {}, "Mon carnet"),
+          h("button", { type: "button", class: "btn btn-secondaire no-print", onclick: () => window.print() }, "Imprimer"),
+        ]),
+        h("p", {}, "Seules les consultations validées par le médecin apparaissent ici."),
+        h("section", { class: "pile" }, [
+          h("h2", {}, "Identité"),
+          info("Nom", fiche.nom_complet),
+          info("Sexe", libelleSexe(fiche.sexe)),
+          info("Âge", libelleAge(fiche.date_naissance)),
+          info("Date de naissance", fiche.date_naissance ? formatDateLongue(fiche.date_naissance) : ""),
+          info("Groupe sanguin", fiche.groupe_sanguin),
+          info("Téléphone", fiche.telephone),
+          info("Adresse", fiche.adresse),
+        ]),
+        h("section", { class: "carte carte-forte pile" }, [
+          h("h2", {}, "Allergies"),
+          h("p", {}, atcd.allergies),
+        ]),
+        h("section", { class: "carte pile" }, [
+          h("h2", {}, "Traitements en cours"),
+          h("p", {}, atcd.traitements_en_cours),
+        ]),
+        h("section", { class: "pile" }, [
+          h("h2", {}, "Antécédents"),
+          blocAntecedents(atcd),
+        ]),
+        h("section", { class: "pile" }, [
+          h("h2", {}, "Consultations"),
+          consultations.length
+            ? consultations.map((item) => consultationVisible(item))
+            : vide("Aucune consultation validée", "Quand le médecin valide une consultation, elle apparaît ici."),
+        ]),
+      );
+      focusTitre();
+    } catch (error) {
+      if (ticket !== generation) return;
+      racine.replaceChildren(alerte("Erreur", message(error)));
+    }
+  }
+}
+
+function consultationVisible(item) {
+  const dossier = normalizeDossier(item.dossier, { conserverAcceptation: true });
+  const traitements = dossier.traitement_suggere.filter((ligne) => ligne.molecule);
+  return h("article", { class: "carte pile" }, [
+    h("h3", {}, formatDateLongue(item.created_at) || "Consultation"),
+    h("p", {}, [h("strong", {}, "Motif : "), dossier.motif_consultation]),
+    h("p", {}, [h("strong", {}, "Résumé : "), dossier.resume_patient]),
+    h("div", { class: "pile" }, [
+      h("p", {}, h("strong", {}, "Traitements retenus")),
+      traitements.length
+        ? h("ul", { class: "liste" }, traitements.map((ligne) => h("li", {}, `${ligne.molecule} — ${ligne.posologie} — ${ligne.duree}`)))
+        : h("p", {}, "Aucun traitement retenu."),
+    ]),
+    h("div", { class: "pile" }, [
+      h("p", {}, h("strong", {}, "Examens")),
+      dossier.examens_complementaires.length
+        ? h("ul", { class: "liste" }, dossier.examens_complementaires.map((ligne) => h("li", {}, ligne)))
+        : h("p", {}, "Aucun examen noté."),
+    ]),
+    h("p", {}, [h("strong", {}, "Conduite à tenir : "), dossier.conduite_a_tenir]),
+  ]);
+}
+
+function espace(user, ticket) {
+  const racine = h("div", { class: "pile" });
+  racine.append(h("h1", {}, "Mon espace"), squelettes());
+  void charger();
+  return racine;
+
+  async function charger() {
+    try {
+      const fiche = await monDossier();
+      if (ticket !== generation) return;
+      racine.replaceChildren(formulaire(fiche));
+      focusTitre();
+    } catch (error) {
+      if (ticket !== generation) return;
+      racine.replaceChildren(alerte("Erreur", message(error)));
+    }
+  }
+
+  function formulaire(fiche) {
+    const nom = h("input", { type: "text", autocomplete: "name", value: user.nom_affichage || "" });
+    const telephone = h("input", { type: "tel", autocomplete: "tel", value: fiche.telephone || "" });
+    const adresse = h("textarea", { rows: "3", autocomplete: "street-address" });
+    adresse.value = fiche.adresse || "";
+    const identifiant = h("input", {
+      type: "text",
+      autocomplete: "username",
+      autocapitalize: "none",
+      spellcheck: "false",
+      value: user.identifiant || "",
+    });
+    const erreur = h("div");
+    const bouton = h("button", { type: "submit", class: "btn btn-primaire" }, "Enregistrer");
+    const mot = h("input", { id: "mot-de-passe-espace", type: "password", autocomplete: "new-password" });
+    const confirmation = h("input", { type: "password", autocomplete: "new-password" });
+    const erreurMot = h("div");
+    const boutonMot = h("button", { type: "submit", class: "btn btn-primaire" }, "Changer le mot de passe");
+    return h("div", { class: "pile" }, [
+      h("h1", {}, "Mon espace"),
+      h("form", {
+        class: "carte pile",
+        novalidate: true,
+        onsubmit: (event) => {
+          event.preventDefault();
+          void sauver();
+        },
+      }, [
+        h("h2", {}, "Coordonnées"),
+        champ("Nom affiché", nom),
+        champ("Téléphone", telephone),
+        champ("Adresse", adresse),
+        champ("Identifiant", identifiant, "Lettres minuscules, chiffres et points. Au moins 3 caractères."),
+        erreur,
+        bouton,
+      ]),
+      h("form", {
+        class: "carte pile",
+        novalidate: true,
+        onsubmit: (event) => {
+          event.preventDefault();
+          void sauverMot();
+        },
+      }, [
+        h("h2", {}, "Mot de passe"),
+        champ("Nouveau mot de passe", mot, "Au moins 8 caractères."),
+        champ("Confirmation", confirmation),
+        erreurMot,
+        boutonMot,
+      ]),
+    ]);
+
+    async function sauver() {
+      erreur.replaceChildren();
+      const nomPropre = nom.value.trim();
+      const identifiantPropre = identifiant.value.trim().toLowerCase();
+      if (!nomPropre) {
+        erreur.append(alerte("À compléter", "Le nom affiché est obligatoire."));
+        return;
+      }
+      if (!identifiantValide(identifiantPropre)) {
+        erreur.append(alerte("À compléter", "Identifiant invalide. Lettres minuscules, chiffres, points, au moins 3 caractères."));
+        return;
+      }
+      bouton.disabled = true;
+      try {
+        if (identifiantPropre !== (utilisateurCourant().identifiant || "")) {
+          await changerIdentifiant(identifiantPropre);
+        }
+        await majProfil({ nom_affichage: nomPropre });
+        await updatePatient(fiche.id, {
+          telephone: telephone.value.trim(),
+          adresse: adresse.value.trim(),
+        });
+        toast("Coordonnées enregistrées.", "succes");
+        peindre();
+      } catch (error) {
+        erreur.replaceChildren(alerte("Erreur", message(error)));
+        bouton.disabled = false;
+      }
+    }
+
+    async function sauverMot() {
+      erreurMot.replaceChildren();
       if (mot.value.length < 8) {
-        erreur.replaceChildren(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
+        erreurMot.append(alerte("À compléter", "Le mot de passe doit contenir au moins 8 caractères."));
         return;
       }
       if (mot.value !== confirmation.value) {
-        erreur.replaceChildren(alerte("À compléter", "Les deux mots de passe ne correspondent pas."));
+        erreurMot.append(alerte("À compléter", "Les deux mots de passe ne correspondent pas."));
         return;
       }
+      boutonMot.disabled = true;
+      try {
+        await changerMotDePasse(mot.value);
+        mot.value = "";
+        confirmation.value = "";
+        toast("Mot de passe mis à jour.", "succes");
+        boutonMot.disabled = false;
+      } catch (error) {
+        erreurMot.replaceChildren(alerte("Erreur", message(error)));
+        boutonMot.disabled = false;
+      }
     }
-    try {
-      await majProfil({ nom_affichage: nom.value });
-      await updatePatient(patient.id, { telephone: telephone.value.trim(), adresse: adresse.value.trim() });
-      if (propre !== (patient.identifiant || "").toLowerCase()) await changerIdentifiant(propre);
-      if (mot.value) await changerMotDePasse(mot.value);
-      toast("Espace mis à jour.", "succes");
-      mot.value = "";
-      confirmation.value = "";
-      dessiner();
-    } catch (e) {
-      erreur.replaceChildren(alerte("Erreur", e.message));
-    }
-  });
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Mon espace"),
-    h("p", {}, "Vous pouvez changer votre nom affiché, votre téléphone, votre adresse, votre identifiant et votre mot de passe."),
-    form,
-  ]);
+  }
 }
 
-function carnet(patient, consultations) {
-  const atcd = normaliserAntecedents(patient.antecedents);
-  return h("div", { class: "pile" }, [
-    h("h1", {}, "Mon carnet de santé"),
-    h("section", { class: "carte pile" }, [
-      h("h2", {}, patient.nom_complet),
-      h("p", {}, `${libelleAge(patient.date_naissance)} · ${libelleSexe(patient.sexe)} · Groupe ${patient.groupe_sanguin || "non renseigné"}`),
-      h("p", {}, `Identifiant : ${patient.identifiant}`),
-      h("p", {}, `Téléphone : ${patient.telephone || "Non renseigné"}`),
-      h("p", {}, `Adresse : ${patient.adresse || "Non renseignée"}`),
-    ]),
-    h("section", { class: "carte carte-forte pile" }, [
-      h("h2", {}, "Allergies"),
-      h("p", {}, atcd.allergies || "Non renseigné"),
-    ]),
-    h("section", { class: "carte pile" }, [
-      h("h2", {}, "Antécédents"),
-      ...ANTECEDENTS.filter(([cle]) => cle !== "allergies").map(([cle, label]) => ligneAntecedent(label, atcd[cle])),
-    ]),
-    h("section", { class: "pile" }, [
-      h("h2", {}, "Consultations validées"),
-      consultations.length
-        ? consultations.map(consultationPatient)
-        : vide("Aucune consultation validée", "Dès que le médecin valide un dossier, il apparaît ici."),
-    ]),
-  ]);
-}
-
-async function dessiner() {
-  const user = utilisateurCourant();
-  if (user && user.role !== "patient") {
-    location.replace("index.html#/patients");
-    return;
+async function demarrer() {
+  ecran.replaceChildren(squelettes());
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
-  if (!user) {
-    document.title = "Connexion — MediVoix";
-    coquille(ecranConnexion());
-    return;
-  }
-  if (user.doit_changer_identifiants) {
-    document.title = "Choisir mes accès — MediVoix";
-    coquille(ecranChangement());
-    return;
-  }
-  document.title = vue === "espace" ? "Mon espace — MediVoix" : "Mon carnet de santé — MediVoix";
-  coquille(squelettes());
   try {
-    const patient = await monDossier();
-    if (vue === "espace") {
-      coquille(ecranEspace(patient));
-      return;
-    }
-    const consultations = await listConsultations(patient.id);
-    coquille(carnet(patient, consultations));
-  } catch (e) {
-    coquille(alerte("Erreur", e.message || "Impossible d'ouvrir le carnet."));
+    await init();
+  } catch (error) {
+    ecran.replaceChildren(alerte("Erreur", error.message || "Démarrage impossible."));
+    return;
   }
+  peindre();
 }
 
-await init();
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
-}
-dessiner();
+void demarrer();

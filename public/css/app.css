@@ -127,7 +127,7 @@ img { max-width: 100%; height: auto; }
   cursor: pointer;
 }
 
-.nav a[aria-current="page"], .nav a:hover, .nav button:hover {
+.nav a[aria-current="page"], .nav button[aria-current="page"], .nav a:hover, .nav button:hover {
   background: var(--vert);
   border-color: var(--vert);
   color: var(--blanc);
@@ -491,5 +491,6 @@ th { background: var(--marine); color: var(--blanc); font-weight: 700; }
   body { background: var(--blanc); }
   .contenu { width: auto; padding: 0; }
   .carte { break-inside: avoid; }
+  .avec-barre { padding-bottom: 0; }
   a { text-decoration: none; }
 }

@@ -5,3 +5,5 @@ node_modules/
 .wrangler/
 *.log
 .supabase/
+uploads/
+PROMPTS_COPILOT.md

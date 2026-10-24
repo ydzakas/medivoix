@@ -108,6 +108,7 @@ export function creerReconnaissance() {
     reset() {
       etat.finalText = "";
       etat.interimText = "";
+      etat.error = "";
       emettre();
     },
     setFinalText(texte) {
