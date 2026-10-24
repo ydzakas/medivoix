@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { extraireJson } from "../lib/extraire.js";
+import { genererAvecGemma, MODEL } from "../lib/gemma.js";
 import { buildDossierLocal, EXEMPLE_DICTEE } from "../public/js/dossier.js";
 import { lireJeton } from "../public/js/qr.js";
 import {
@@ -205,9 +207,48 @@ function verifierSources() {
   assert.match(serveur, /8741/);
   assert.match(serveur, /0\.0\.0\.0/);
   assert.match(serveur, /buildDossierLocal/);
+  assert.match(serveur, /genererAvecGemma/);
+  assert.match(serveur, /GEMINI_API_KEY/);
   assert.match(serveur, /camera=\(self\)/);
   assert.match(serveur, /source: "local"/);
+  assert.match(serveur, /source: "gemma"/);
+  assert.match(pages, /Clé absente : structuration locale/);
   console.log("ok sources");
+}
+
+async function verifierGemma() {
+  const extrait = extraireJson("```json\n{\"motif_consultation\":\"Toux\"}\n```");
+  assert.equal(extrait.motif_consultation, "Toux");
+  let urlVue = "";
+  const dossier = await genererAvecGemma({
+    dictation: "toux depuis trois jours",
+    patient: { age: 30, sex: "F" },
+    antecedents: { allergies: "Aucune" },
+    apiKey: "cle-simulee",
+    fetchImpl: async (url, options) => {
+      urlVue = String(url);
+      assert.equal(options.method, "POST");
+      const corps = JSON.parse(options.body);
+      assert.match(corps.systemInstruction.parts[0].text, /objet JSON/);
+      assert.equal(corps.contents[0].parts[0].text.includes("toux depuis trois jours"), true);
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: "{\"motif_consultation\":\"Toux\"}" }] } }],
+        }),
+      };
+    },
+  });
+  assert.equal(MODEL, "gemma-4-26b-a4b-it");
+  assert.equal(urlVue.includes("generativelanguage.googleapis.com"), true);
+  assert.equal(urlVue.includes(MODEL), true);
+  assert.equal(urlVue.includes("cle-simulee"), true);
+  assert.equal(dossier.motif_consultation, "Toux");
+  await assert.rejects(
+    () => genererAvecGemma({ dictation: "x", apiKey: "", fetchImpl: async () => { throw new Error("reseau"); } }),
+    /Clé absente/,
+  );
+  console.log("ok gemma");
 }
 
 try {
@@ -216,6 +257,7 @@ try {
   verifierJeton();
   verifierCouleurs();
   verifierSources();
+  await verifierGemma();
   console.log("Tous les contrôles MediVoix sont passés.");
 } catch (error) {
   console.error(error);

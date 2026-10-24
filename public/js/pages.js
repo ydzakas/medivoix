@@ -723,7 +723,7 @@ export function consultation(params) {
       h("section", { class: "pile" }, [
         h("h2", {}, "Dictée"),
         estLocal()
-          ? h("p", { class: "aide" }, "Mode local : le dossier est rédigé sur cet appareil, sans modèle distant.")
+          ? h("p", { class: "aide" }, "Sans clé GEMINI_API_KEY, ce serveur fait une structuration locale.")
           : h("p", { class: "aide" }, "La dictée est transmise à la rédaction de la clinique, puis relue ici."),
         zoneDictee,
         h("div", { class: "rangee" }, [
@@ -751,10 +751,12 @@ export function consultation(params) {
         ...(dossier.elements_manquants.length ? [alerte("À compléter", dossier.elements_manquants)] : []),
       );
       const precision = source === "local"
-        ? "Rédaction locale. Relisez chaque ligne avant de valider."
-        : source === "enregistrée"
-          ? "Dossier déjà enregistré. Relisez-le avant de valider."
-          : "Proposition générée. Relisez chaque ligne avant de valider.";
+        ? "Clé absente : structuration locale. Relisez chaque ligne avant de valider."
+        : source === "gemma"
+          ? "Rédigé par Gemma. Relisez chaque ligne avant de valider."
+          : source === "enregistrée"
+            ? "Dossier déjà enregistré. Relisez-le avant de valider."
+            : "Proposition générée. Relisez chaque ligne avant de valider.";
       zoneSource.textContent = `Seules les lignes cochées « Retenir » seront enregistrées. ${precision}`;
     }
 

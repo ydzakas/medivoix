@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { genererAvecGemma } from "./lib/gemma.js";
 import { buildDossierLocal } from "./public/js/dossier.js";
 
 const PORT = 8741;
@@ -63,6 +64,38 @@ function cibleDe(pathname) {
   return cible;
 }
 
+function valeurEnv(texte, nom) {
+  const lignes = String(texte || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  for (const ligne of lignes) {
+    const propre = ligne.trim();
+    if (!propre || propre.startsWith("#")) continue;
+    const coupe = propre.indexOf("=");
+    if (coupe < 0) continue;
+    const cle = propre.slice(0, coupe).trim().replace(/^export\s+/, "");
+    if (cle !== nom) continue;
+    let valeur = propre.slice(coupe + 1).trim();
+    if (
+      (valeur.startsWith('"') && valeur.endsWith('"'))
+      || (valeur.startsWith("'") && valeur.endsWith("'"))
+    ) {
+      valeur = valeur.slice(1, -1).trim();
+    }
+    return valeur;
+  }
+  return "";
+}
+
+async function cleGemini() {
+  const deja = String(process.env.GEMINI_API_KEY || "").trim();
+  if (deja) return deja;
+  try {
+    const fichier = await fs.readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".env"), "utf8");
+    return valeurEnv(fichier, "GEMINI_API_KEY");
+  } catch {
+    return "";
+  }
+}
+
 function lireCorps(req) {
   return new Promise((resolve, reject) => {
     const morceaux = [];
@@ -111,6 +144,17 @@ async function generer(req, res) {
     return;
   }
   try {
+    const apiKey = await cleGemini();
+    if (apiKey) {
+      const dossier = await genererAvecGemma({
+        dictation,
+        patient: corps.patient || {},
+        antecedents: corps.antecedents || {},
+        apiKey,
+      });
+      envoyerJson(res, 200, { dossier, source: "gemma" });
+      return;
+    }
     const dossier = buildDossierLocal({
       dictation,
       patient: corps.patient || {},
