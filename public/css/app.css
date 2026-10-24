@@ -205,7 +205,10 @@ img { max-width: 100%; height: auto; }
   padding: 28px 20px 72px;
 }
 
-.ecran-etroit { max-width: 640px; }
+.ecran-etroit {
+  width: min(640px, 100%);
+  margin-inline: auto;
+}
 
 .pile { display: flex; flex-direction: column; gap: 16px; }
 .rangee { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
